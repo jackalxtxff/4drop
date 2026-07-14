@@ -105,12 +105,18 @@ export interface Product {
   name: string | null;
   season: string | null;
   thorn: boolean | null;
+  tyre_type: string | null;
+  constr: string | null;
+  camera: string | null;
+  noise: string | null;
+  strengthening: boolean | null;
   width: string | null;
   height: string | null;
   diameter: string | null;
   load_index: string | null;
   speed_index: string | null;
   img_small: string | null;
+  img_big: string | null;
   total_rest: number;
   min_price: string | null;
   price_rozn: string | null;
@@ -122,6 +128,8 @@ export interface ProductPage {
   total: number;
   page: number;
   page_size: number;
+  in_stock_count: number;
+  total_rest: number;
 }
 
 export interface Facets {
@@ -129,7 +137,38 @@ export interface Facets {
   seasons: string[];
   goods_types: string[];
   diameters: string[];
+  widths: string[];
+  heights: string[]; // профиль
+  tyre_types: string[];
+  constrs: string[];
+  cameras: string[];
 }
+
+export interface ProductStock {
+  wrh: number;
+  name: string | null;
+  rest: number;
+  price: string | null;
+  logistic_days: number | null;
+  selected: boolean;
+}
+
+export type SortField =
+  | "cae"
+  | "brand"
+  | "model"
+  | "name"
+  | "season"
+  | "width"
+  | "height"
+  | "diameter"
+  | "tyre_type"
+  | "constr"
+  | "camera"
+  | "noise"
+  | "total_rest"
+  | "min_price"
+  | "integration_status";
 
 export interface SyncJob {
   id: number;

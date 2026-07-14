@@ -166,6 +166,13 @@ async def _enrich_attrs(
                 continue
 
             product.attrs = a
+            # У дисков RimContainer.type — целое число (0/1/2), а не тип шины,
+            # поэтому заполняем только для шин, иначе фильтр забьётся мусором.
+            product.tyre_type = a.get("type") if item.goods_type == "tyre" else None
+            product.constr = a.get("constr")
+            product.camera = a.get("camera")
+            product.noise = a.get("noise")
+            product.strengthening = a.get("strengthening")
             product.width = _to_num(a.get("width"))
             product.height = _to_num(a.get("height"))
             product.diameter = _to_num(a.get("diameter"))

@@ -4,9 +4,9 @@ import { api, type Credential } from "../api";
 import { useSupplier } from "../components/Layout";
 
 const STATUS_STYLE: Record<string, string> = {
-  ok: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-  error: "bg-red-50 text-red-700 ring-red-200",
-  not_configured: "bg-slate-100 text-slate-600 ring-slate-200",
+  ok: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-800",
+  error: "bg-red-50 text-red-700 ring-red-200 dark:bg-red-950 dark:text-red-300 dark:ring-red-800",
+  not_configured: "bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:ring-slate-700",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -43,11 +43,11 @@ function Card({
   checking: boolean;
 }) {
   return (
-    <section className="rounded-xl border border-slate-200 bg-white p-6">
+    <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-start justify-between">
         <div>
           <h2 className="font-semibold tracking-tight">{title}</h2>
-          <p className="mt-0.5 text-sm text-slate-500">{subtitle}</p>
+          <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">{subtitle}</p>
         </div>
         <StatusBadge status={cred?.status ?? "not_configured"} />
       </div>
@@ -55,7 +55,9 @@ function Card({
       {cred?.status_message && (
         <p
           className={`mt-3 rounded-md px-3 py-2 text-sm ${
-            cred.status === "error" ? "bg-red-50 text-red-700" : "bg-slate-50 text-slate-600"
+            cred.status === "error"
+              ? "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300"
+              : "bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
           }`}
         >
           {cred.status_message}
@@ -67,7 +69,7 @@ function Card({
       <button
         onClick={onCheck}
         disabled={checking}
-        className="mt-4 rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-50"
+        className="mt-4 rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800 disabled:opacity-50"
       >
         {checking ? "Проверяем…" : "Проверить подключение"}
       </button>
@@ -90,13 +92,13 @@ function Field({
 }) {
   return (
     <div>
-      <label className="block text-sm font-medium text-slate-700">{label}</label>
+      <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">{label}</label>
       <input
         type={type}
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none"
+        className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-slate-400"
       />
     </div>
   );
@@ -153,14 +155,14 @@ export function ConnectionsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Подключения</h1>
-        <p className="mt-1 text-sm text-slate-500">
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
           Доступы привязаны к поставщику «{current?.name}». Секреты хранятся в базе только
           в зашифрованном виде.
         </p>
       </div>
 
       {error && (
-        <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+        <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">{error}</p>
       )}
 
       <div className="grid gap-6 lg:grid-cols-3">
@@ -268,15 +270,15 @@ export function ConnectionsPage() {
       </div>
 
       {ftCred && ftCred.warehouses.length > 0 && (
-        <section className="rounded-xl border border-slate-200 bg-white p-6">
+        <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
           <h2 className="font-semibold tracking-tight">Склады 4tochki</h2>
-          <p className="mt-0.5 text-sm text-slate-500">
+          <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
             Остатки берутся только с выбранных складов. Срок логистики напрямую съедает SLA
             сборки на маркетплейсе — склады с долгой доставкой лучше не включать.
           </p>
 
           {ftCred.selected_warehouses.length === 0 && (
-            <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
               Ни один склад не выбран — остатки по всем товарам будут нулевыми.
             </p>
           )}
@@ -289,7 +291,9 @@ export function ConnectionsPage() {
                 <label
                   key={w.id}
                   className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition ${
-                    checked ? "border-slate-900 bg-slate-50" : "border-slate-200 hover:bg-slate-50"
+                    checked
+                      ? "border-slate-900 bg-slate-50 dark:border-slate-400 dark:bg-slate-800"
+                      : "border-slate-200 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
                   }`}
                 >
                   <input
@@ -300,7 +304,7 @@ export function ConnectionsPage() {
                   />
                   <span className="min-w-0">
                     <span className="block truncate text-sm font-medium">{w.name}</span>
-                    <span className="mt-0.5 block text-xs text-slate-500">
+                    <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
                       Логистика: {w.logistic_days ?? "—"} дн.
                       {slow && <span className="ml-1 text-amber-700">риск для SLA</span>}
                       {w.is_paid_delivery && <span className="ml-1">· платная доставка</span>}

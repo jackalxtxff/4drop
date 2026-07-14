@@ -97,16 +97,33 @@ class ProductOut(BaseModel):
     name: str | None
     season: str | None
     thorn: bool | None
+    tyre_type: str | None
+    constr: str | None
+    camera: str | None
+    noise: str | None
+    strengthening: bool | None
     width: Decimal | None
     height: Decimal | None
     diameter: Decimal | None
     load_index: str | None
     speed_index: str | None
     img_small: str | None
+    img_big: str | None
     total_rest: int
     min_price: Decimal | None
     price_rozn: Decimal | None
     integration_status: str
+
+
+class ProductStockOut(BaseModel):
+    """Остаток по одному складу — для всплывающей подсказки над колонкой «Остаток»."""
+
+    wrh: int
+    name: str | None
+    rest: int
+    price: Decimal | None
+    logistic_days: int | None
+    selected: bool  # входит ли склад в выбранный набор
 
 
 class ProductPage(BaseModel):
@@ -114,6 +131,11 @@ class ProductPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+    # Считаются по тем же фильтрам, что и total: сводка под отфильтрованной
+    # выборкой, а не по всему каталогу.
+    in_stock_count: int  # моделей с ненулевым остатком
+    total_rest: int      # суммарный остаток в штуках
 
 
 class ProductFacets(BaseModel):
@@ -123,6 +145,11 @@ class ProductFacets(BaseModel):
     seasons: list[str]
     goods_types: list[str]
     diameters: list[Decimal]
+    widths: list[Decimal]
+    heights: list[Decimal]  # профиль
+    tyre_types: list[str]
+    constrs: list[str]
+    cameras: list[str]
 
 
 class IntegrateRequest(BaseModel):

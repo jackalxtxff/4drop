@@ -4,7 +4,10 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import "./index.css";
 import { Layout } from "./components/Layout";
+import { initTheme } from "./components/ThemeToggle";
 import { auth } from "./api";
+
+initTheme();
 import { ConnectionsPage } from "./pages/Connections";
 import { LoginPage } from "./pages/Login";
 import { ProductsPage } from "./pages/Products";

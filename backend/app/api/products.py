@@ -8,18 +8,31 @@ from sqlalchemy import Select, func, select
 
 from app.config import get_settings
 from app.deps import SessionDep, SupplierDep
-from app.models import IntegrationStatus, Product, SyncJob
+from app.models import (
+    Credential,
+    IntegrationStatus,
+    Platform,
+    Product,
+    ProductStock,
+    SyncJob,
+)
 from app.schemas import (
     IntegrateRequest,
     ProductFacets,
     ProductOut,
     ProductPage,
+    ProductStockOut,
     SyncJobOut,
 )
 
 router = APIRouter(prefix="/suppliers/{supplier_id}/products", tags=["products"])
 
-SortField = Literal["cae", "brand", "min_price", "total_rest"]
+SortField = Literal[
+    "cae", "brand", "model", "name", "season",
+    "width", "height", "diameter",
+    "tyre_type", "constr", "camera", "noise",
+    "total_rest", "min_price", "integration_status",
+]
 
 
 def _apply_filters(
@@ -30,6 +43,11 @@ def _apply_filters(
     season: list[str] | None,
     goods_type: list[str] | None,
     diameter: list[Decimal] | None,
+    width: list[Decimal] | None,
+    height: list[Decimal] | None,
+    tyre_type: list[str] | None,
+    constr: list[str] | None,
+    camera: list[str] | None,
     in_stock: bool | None,
     price_min: Decimal | None,
     price_max: Decimal | None,
@@ -52,6 +70,16 @@ def _apply_filters(
         stmt = stmt.where(Product.goods_type.in_(goods_type))
     if diameter:
         stmt = stmt.where(Product.diameter.in_(diameter))
+    if width:
+        stmt = stmt.where(Product.width.in_(width))
+    if height:
+        stmt = stmt.where(Product.height.in_(height))
+    if tyre_type:
+        stmt = stmt.where(Product.tyre_type.in_(tyre_type))
+    if constr:
+        stmt = stmt.where(Product.constr.in_(constr))
+    if camera:
+        stmt = stmt.where(Product.camera.in_(camera))
     if in_stock is True:
         stmt = stmt.where(Product.total_rest > 0)
     elif in_stock is False:
@@ -74,6 +102,11 @@ async def list_products(
     season: Annotated[list[str] | None, Query()] = None,
     goods_type: Annotated[list[str] | None, Query()] = None,
     diameter: Annotated[list[Decimal] | None, Query()] = None,
+    width: Annotated[list[Decimal] | None, Query()] = None,
+    height: Annotated[list[Decimal] | None, Query()] = None,
+    tyre_type: Annotated[list[str] | None, Query()] = None,
+    constr: Annotated[list[str] | None, Query()] = None,
+    camera: Annotated[list[str] | None, Query()] = None,
     in_stock: Annotated[bool | None, Query()] = None,
     price_min: Annotated[Decimal | None, Query()] = None,
     price_max: Annotated[Decimal | None, Query()] = None,
@@ -89,6 +122,11 @@ async def list_products(
         season=season,
         goods_type=goods_type,
         diameter=diameter,
+        width=width,
+        height=height,
+        tyre_type=tyre_type,
+        constr=constr,
+        camera=camera,
         in_stock=in_stock,
         price_min=price_min,
         price_max=price_max,
@@ -97,13 +135,27 @@ async def list_products(
 
     base = _apply_filters(select(Product).where(Product.supplier_id == supplier.id), **filters)
 
-    total = await session.scalar(
-        select(func.count()).select_from(base.with_only_columns(Product.id).subquery())
-    )
+    # Счётчик и сводку берём одним проходом по отфильтрованной выборке:
+    # три отдельных агрегата по каталогу в 22k строк — три одинаковых скана.
+    sub = base.with_only_columns(Product.id, Product.total_rest).subquery()
+    total, in_stock_count, total_rest = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(sub.c.total_rest > 0),
+                func.coalesce(func.sum(sub.c.total_rest), 0),
+            ).select_from(sub)
+        )
+    ).one()
 
     column = getattr(Product, sort)
+    direction = column.desc() if order == "desc" else column.asc()
+
     stmt = (
-        base.order_by(column.desc() if order == "desc" else column.asc())
+        # NULLS LAST: товары без бренда или цены не должны занимать первую страницу.
+        # Product.id — тайбрейкер: сортировка по колонке с повторами (бренд, сезон)
+        # без него даёт нестабильный порядок, и строки дублируются между страницами.
+        base.order_by(direction.nullslast(), Product.id.asc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -114,6 +166,8 @@ async def list_products(
         total=total or 0,
         page=page,
         page_size=page_size,
+        in_stock_count=in_stock_count or 0,
+        total_rest=total_rest or 0,
     )
 
 
@@ -133,7 +187,68 @@ async def facets(supplier: SupplierDep, session: SessionDep) -> ProductFacets:
         seasons=await distinct(Product.season),
         goods_types=await distinct(Product.goods_type),
         diameters=await distinct(Product.diameter),
+        widths=await distinct(Product.width),
+        heights=await distinct(Product.height),
+        tyre_types=await distinct(Product.tyre_type),
+        constrs=await distinct(Product.constr),
+        cameras=await distinct(Product.camera),
     )
+
+
+@router.get("/{product_id}/stocks", response_model=list[ProductStockOut])
+async def product_stocks(
+    product_id: int, supplier: SupplierDep, session: SessionDep
+) -> list[ProductStockOut]:
+    """Остатки одного товара в разрезе складов — для подсказки над колонкой «Остаток».
+
+    Отдельным запросом, а не внутри списка: класть склады в каждую из 200 строк
+    страницы значило бы раздувать ответ ради данных, которые нужны для одной
+    строки под курсором.
+
+    Возвращаем ВСЕ склады, включая невыбранные (`selected: false`): если товар лежит
+    на складе, который не отмечен в «Подключениях», это надо видеть — иначе непонятно,
+    почему в колонке ноль, хотя товар у поставщика есть.
+    """
+    product = await session.get(Product, product_id)
+    if product is None or product.supplier_id != supplier.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Товар не найден у этого поставщика")
+
+    cred = (
+        await session.execute(
+            select(Credential).where(
+                Credential.supplier_id == supplier.id,
+                Credential.platform == Platform.FOURTOCHKI,
+            )
+        )
+    ).scalar_one_or_none()
+
+    names = {w["id"]: w.get("name") for w in (cred.warehouses if cred else [])}
+    days = {w["id"]: w.get("logistic_days") for w in (cred.warehouses if cred else [])}
+    selected = set(cred.selected_warehouses if cred else [])
+
+    rows = (
+        (
+            await session.execute(
+                select(ProductStock)
+                .where(ProductStock.product_id == product_id, ProductStock.rest > 0)
+                .order_by(ProductStock.rest.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    return [
+        ProductStockOut(
+            wrh=r.wrh,
+            name=names.get(r.wrh),
+            rest=r.rest,
+            price=r.price,
+            logistic_days=days.get(r.wrh),
+            selected=r.wrh in selected,
+        )
+        for r in rows
+    ]
 
 
 async def _enqueue(function: str, **kwargs) -> None:

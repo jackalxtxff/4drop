@@ -119,6 +119,27 @@ class CreatedOrder:
     marking_required_caes: list[str] = field(default_factory=list)
 
 
+def _list(container: Any) -> list[Any]:
+    """Развернуть WCF-обёртку массива (ArrayOfX) в обычный список.
+
+    zeep отдаёт ArrayOfTyrePriceRest / ArrayOfwh_price_rest / ArrayOfWarehouseInfo
+    как объект с единственным полем-списком, а не как список. Итерация по самой
+    обёртке молча даёт пустоту — из-за этого выгрузка каталога возвращала 0 позиций.
+    Имя внутреннего поля у каждого типа своё, поэтому берём единственный список
+    из значений, а не хардкодим имена.
+    """
+    if container is None:
+        return []
+    if isinstance(container, list):
+        return container
+    values = getattr(container, "__values__", None)
+    if values:
+        for value in values.values():
+            if isinstance(value, list):
+                return value
+    return []
+
+
 def _err_text(err: Any) -> str | None:
     """Error { code: int, comment: string } — общий для всех ответов."""
     if err is None:
@@ -190,7 +211,7 @@ class FourTochkiClient:
                 _err_text(getattr(result, "error", None)) or "GetWarehouses: неизвестная ошибка"
             )
 
-        warehouses = getattr(result, "warehouses", None) or []
+        warehouses = _list(getattr(result, "warehouses", None))
         out: list[Warehouse] = []
         for w in warehouses:
             wid = getattr(w, "id", None)
@@ -236,7 +257,7 @@ class FourTochkiClient:
             raise FourTochkiError(f"GetGoodsPriceRestByCode: {error}")
 
         out: list[PriceRest] = []
-        for row in getattr(result, "price_rest_list", None) or []:
+        for row in _list(getattr(result, "price_rest_list", None)):
             cae = getattr(row, "code", None)
             if not cae:
                 continue
@@ -247,7 +268,7 @@ class FourTochkiClient:
                     price=_dec(getattr(w, "price", None)),
                     price_rozn=_dec(getattr(w, "price_rozn", None)),
                 )
-                for w in (getattr(row, "whpr", None) or [])
+                for w in _list(getattr(row, "whpr", None))
                 if getattr(w, "wrh", None) is not None
             ]
             out.append(PriceRest(cae=cae, warehouses=per_wh))
@@ -268,7 +289,7 @@ class FourTochkiClient:
 
         items: list[GoodsItem] = []
         for container, goods_type in GOODS_CONTAINERS.items():
-            for entry in getattr(result, container, None) or []:
+            for entry in _list(getattr(result, container, None)):
                 cae = getattr(entry, "code", None)
                 if not cae:
                     continue
@@ -340,7 +361,7 @@ class FourTochkiClient:
         total_pages = int(getattr(result, "totalPages", 0) or 0)
         entries: list[CatalogEntry] = []
 
-        for row in getattr(result, "price_rest_list", None) or []:
+        for row in _list(getattr(result, "price_rest_list", None)):
             cae = getattr(row, "code", None)
             if not cae:
                 continue
@@ -363,7 +384,7 @@ class FourTochkiClient:
                             price=_dec(getattr(w, "price", None)),
                             price_rozn=_dec(getattr(w, "price_rozn", None)),
                         )
-                        for w in (getattr(row, "whpr", None) or [])
+                        for w in _list(getattr(row, "whpr", None))
                         if getattr(w, "wrh", None) is not None
                     ],
                 )
@@ -467,11 +488,11 @@ class FourTochkiClient:
         """
         item_errors = [
             {k: _jsonable(v) for k, v in serialize_object(e, dict).items()}
-            for e in (getattr(result, "error_product_list", None) or [])
+            for e in _list(getattr(result, "error_product_list", None))
         ]
         marking = [
             g.code
-            for g in (getattr(result, "goods", None) or [])
+            for g in _list(getattr(result, "goods", None))
             if getattr(g, "marking_is_required", False) and getattr(g, "code", None)
         ]
         return CreatedOrder(

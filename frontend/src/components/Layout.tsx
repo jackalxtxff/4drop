@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 
 import { api, auth, type Supplier } from "../api";
+import { SupplierDialog } from "./SupplierDialog";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface SupplierCtx {
   suppliers: Supplier[];
@@ -30,6 +32,7 @@ export function Layout() {
   });
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
+  const [editing, setEditing] = useState(false);
 
   const setCurrentId = (id: number) => {
     setCurrentIdState(id);
@@ -65,12 +68,14 @@ export function Layout() {
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `px-3 py-2 text-sm rounded-md transition ${
-      isActive ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+      isActive
+        ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+        : "text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
     }`;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
+    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="mx-auto flex max-w-[1600px] items-center gap-6 px-6 py-3">
           <span className="font-semibold tracking-tight">4drop</span>
 
@@ -92,28 +97,28 @@ export function Layout() {
                   onChange={(e) => setNewName(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && void createSupplier()}
                   placeholder="Название поставщика"
-                  className="rounded-md border border-slate-300 px-2 py-1.5 text-sm"
+                  className="rounded-md border border-slate-300 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
                 />
                 <button
                   onClick={() => void createSupplier()}
-                  className="rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white"
+                  className="rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white dark:bg-slate-100 dark:text-slate-900"
                 >
                   Создать
                 </button>
                 <button
                   onClick={() => setCreating(false)}
-                  className="text-sm text-slate-500 hover:text-slate-800"
+                  className="text-sm text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
                 >
                   Отмена
                 </button>
               </div>
             ) : (
               <>
-                <label className="text-sm text-slate-500">Поставщик</label>
+                <label className="text-sm text-slate-500 dark:text-slate-400">Поставщик</label>
                 <select
                   value={currentId ?? ""}
                   onChange={(e) => setCurrentId(Number(e.target.value))}
-                  className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
                 >
                   {suppliers.length === 0 && <option value="">— нет —</option>}
                   {suppliers.map((s) => (
@@ -122,32 +127,55 @@ export function Layout() {
                     </option>
                   ))}
                 </select>
+                {current && (
+                  <button
+                    onClick={() => setEditing(true)}
+                    title={`Переименовать «${current.name}»`}
+                    aria-label="Настройки поставщика"
+                    className="rounded-md border border-slate-300 px-2.5 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                  >
+                    Изменить
+                  </button>
+                )}
                 <button
                   onClick={() => setCreating(true)}
-                  className="rounded-md border border-slate-300 px-2.5 py-1.5 text-sm hover:bg-slate-50"
+                  className="rounded-md border border-slate-300 px-2.5 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
                 >
                   + Добавить
                 </button>
               </>
             )}
 
-            <button onClick={logout} className="text-sm text-slate-500 hover:text-slate-800">
+            <ThemeToggle />
+
+            <button
+              onClick={logout}
+              className="text-sm text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+            >
               Выйти
             </button>
           </div>
         </div>
       </header>
 
+      {editing && current && (
+        <SupplierDialog
+          supplier={current}
+          onClose={() => setEditing(false)}
+          onSaved={reload}
+        />
+      )}
+
       <main className="mx-auto max-w-[1600px] px-6 py-6">
         {suppliers.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-white p-12 text-center">
-            <p className="text-slate-600">
+          <div className="rounded-lg border border-dashed border-slate-300 bg-white p-12 text-center dark:border-slate-700 dark:bg-slate-900">
+            <p className="text-slate-600 dark:text-slate-400">
               Поставщиков пока нет. Создайте первого — к нему привяжутся доступы к 4tochki,
               Wildberries и Ozon, каталог и заказы.
             </p>
             <button
               onClick={() => setCreating(true)}
-              className="mt-4 rounded-md bg-slate-900 px-4 py-2 text-sm text-white"
+              className="mt-4 rounded-md bg-slate-900 px-4 py-2 text-sm text-white dark:bg-slate-100 dark:text-slate-900"
             >
               Создать поставщика
             </button>

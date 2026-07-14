@@ -1,1 +1,6 @@
 @import "tailwindcss";
+
+/* Tailwind v4 по умолчанию завязывает dark: на prefers-color-scheme, а нам нужен
+   ручной режим: переключатель обязан пересиливать системную тему.
+   Класс .dark на <html> ставит ThemeToggle. */
+@custom-variant dark (&:where(.dark, .dark *));

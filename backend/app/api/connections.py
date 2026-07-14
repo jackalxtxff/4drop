@@ -17,6 +17,7 @@ from app.schemas import (
     WBCredentialIn,
 )
 from app.security import decrypt_secret, encrypt_secret, mask_secret
+from app.tasks.catalog_sync import recompute_aggregates
 
 router = APIRouter(prefix="/suppliers/{supplier_id}/connections", tags=["connections"])
 
@@ -209,8 +210,10 @@ async def set_warehouses(
 ) -> Credential:
     """Смена набора складов не требует перевыкачки каталога.
 
-    Цены и остатки лежат в product_stocks по складам, поэтому агрегаты
-    (total_rest, min_price) достаточно пересчитать — этим займётся синхронизация.
+    Цены и остатки лежат в product_stocks по складам, поэтому достаточно пересчитать
+    агрегаты (total_rest, min_price) — это один UPDATE, делаем его сразу здесь.
+    Откладывать пересчёт до следующей синхронизации нельзя: пользователь отметил бы
+    склады и не увидел никакого эффекта, а каталог продолжал бы показывать нули.
     """
     cred = await _require(session, supplier.id, Platform.FOURTOCHKI)
     known = {w["id"] for w in cred.warehouses}
@@ -222,6 +225,7 @@ async def set_warehouses(
         )
 
     cred.selected_warehouses = warehouse_ids
+    await recompute_aggregates(session, supplier.id, warehouse_ids)
     await session.commit()
     await session.refresh(cred)
     return cred

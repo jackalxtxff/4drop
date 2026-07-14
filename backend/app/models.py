@@ -136,6 +136,17 @@ class Product(Base):
     season: Mapped[str | None] = mapped_column(String(32))
     thorn: Mapped[bool | None] = mapped_column(Boolean, default=None)
 
+    # Атрибуты, которые 4tochki показывают в карточке на сайте. Продублированы из
+    # attrs в колонки: по JSONB не построить нормальный индекс под фильтр и
+    # сортировку на каталоге в десятки тысяч позиций.
+    tyre_type: Mapped[str | None] = mapped_column(String(32), index=True)  # attrs.type
+    constr: Mapped[str | None] = mapped_column(String(16))                 # R, D, ...
+    # Не только «TL»/«TT»: у цельнолитых шин сюда приходит описание целиком,
+    # напр. «Цельнолитая немаркая с бортом».
+    camera: Mapped[str | None] = mapped_column(String(64))
+    noise: Mapped[str | None] = mapped_column(String(16))                  # «71dB»
+    strengthening: Mapped[bool | None] = mapped_column(Boolean, default=None)
+
     # Типоразмер. Для шин width/height/diameter, для дисков — width/diameter + attrs.
     width: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
     height: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))

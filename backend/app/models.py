@@ -178,6 +178,11 @@ class Product(Base):
         String(32), default=IntegrationStatus.NONE, index=True
     )
 
+    # Ручная блокировка синхронизации. Заблокированный товар не создаётся и не
+    # обновляется на маркетплейсах ни авто-, ни вручную; его остаток на площадке
+    # форсится в 0 — защита от продажи снятого с продажи. Снимается только вручную.
+    sync_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
@@ -242,6 +247,12 @@ class ProductLink(Base):
     status: Mapped[str] = mapped_column(String(32), default=IntegrationStatus.PENDING)
     status_message: Mapped[str | None] = mapped_column(Text)
     task_id: Mapped[str | None] = mapped_column(String(128))  # id задачи импорта на площадке
+
+    # Хэш атрибутивной части карточки (характеристики, название, картинки — БЕЗ цены
+    # и остатка). По нему задача обновления карточек понимает, изменились ли атрибуты
+    # в 4tochki, и досылает карточку на площадку только когда есть что менять —
+    # иначе каждая правка гоняла бы карточку на модерацию впустую.
+    card_hash: Mapped[str | None] = mapped_column(String(64))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -341,6 +352,21 @@ class SyncSettings(Base):
 
     # Отправка цен и остатков на WB и Ozon.
     push_interval_minutes: Mapped[int] = mapped_column(Integer, default=30)
+
+    # Обновление атрибутов карточек (характеристики, название, картинки), когда они
+    # изменились в 4tochki. Дорого: каждое обновление = повторная модерация, поэтому
+    # по умолчанию раз в сутки, и досылается только реально изменившееся.
+    cards_update_interval_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+
+    # Полностью автоматический режим: товар, появившийся В НАЛИЧИИ и ещё не заведённый
+    # на маркетплейс, система сама создаёт карточкой (не заливая при этом весь каталог
+    # с нулями). Пуш цен/остатков продолжает работать по всем активным карточкам.
+    auto_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Интервал авто-создания карточек. Не слишком часто: каждое создание = модерация.
+    auto_cards_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    # Предохранитель: сколько карточек создаём за один авто-прогон, чтобы не упереться
+    # в rate limit WB и не завалить модерацию тысячами карточек разом.
+    auto_cards_batch_limit: Mapped[int] = mapped_column(Integer, default=50)
 
     missing_strategy: Mapped[str] = mapped_column(
         String(32), default=MissingStrategy.ZERO_STOCK

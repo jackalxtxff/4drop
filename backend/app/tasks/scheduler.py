@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models import Supplier, SyncJob, SyncSettings
+from app.models import Credential, Platform, Supplier, SyncJob, SyncSettings
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +23,8 @@ KINDS = {
     "catalog": "sync_catalog",
     "stocks": "sync_stocks",
     "push": "push_marketplaces",
+    "cards_update": "update_cards",
+    "auto_cards": "auto_cards",
 }
 
 
@@ -69,11 +71,35 @@ async def schedule_due(ctx: dict) -> None:
             )
         ).all()
 
+        # Поставщики без доступов к 4tochki синхронизировать нечем — пропускаем их,
+        # чтобы планировщик не плодил падающие «доступы не заданы» задачи каждую
+        # минуту. Ручной запуск такому поставщику всё равно покажет ошибку.
+        configured = set(
+            (
+                await session.execute(
+                    select(Credential.supplier_id).where(
+                        Credential.platform == Platform.FOURTOCHKI,
+                        Credential.secrets_encrypted.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
         for supplier, settings in rows:
+            if supplier.id not in configured:
+                continue
+
             intervals = {
                 "catalog": settings.catalog_interval_minutes,
                 "stocks": settings.stocks_interval_minutes,
                 "push": settings.push_interval_minutes,
+                "cards_update": settings.cards_update_interval_minutes,
+                # Авто-создание идёт по расписанию только при включённом авто-режиме.
+                "auto_cards": (
+                    settings.auto_cards_interval_minutes if settings.auto_mode else 0
+                ),
             }
 
             for kind, minutes in intervals.items():

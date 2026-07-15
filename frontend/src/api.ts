@@ -122,6 +122,7 @@ export interface Product {
   min_price: string | null;
   price_rozn: string | null;
   integration_status: "none" | "pending" | "active" | "rejected" | "error";
+  sync_blocked: boolean;
   integrations: ProductLink[];
 }
 
@@ -184,6 +185,10 @@ export interface SyncSettings {
   catalog_interval_minutes: number;
   stocks_interval_minutes: number;
   push_interval_minutes: number;
+  cards_update_interval_minutes: number;
+  auto_mode: boolean;
+  auto_cards_interval_minutes: number;
+  auto_cards_batch_limit: number;
   missing_strategy: "zero_stock" | "delete";
   stock_buffer: number;
   wb_price_formula: string;
@@ -197,6 +202,13 @@ export interface FormulaPreview {
   ok: boolean;
   price: string | null;
   error: string | null;
+}
+
+export interface SyncJobPage {
+  items: SyncJob[];
+  total: number;
+  offset: number;
+  limit: number;
 }
 
 export interface SyncJob {

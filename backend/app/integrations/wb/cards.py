@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from decimal import Decimal
 
 from app.models import Product
@@ -201,3 +203,17 @@ def build_card(product: Product, price: Decimal) -> dict:
             }
         ],
     }
+
+
+def card_content_hash(product: Product) -> str:
+    """Хэш атрибутивной части карточки — без цены и остатка.
+
+    Цена меняется часто и уходит отдельным пушем, поэтому в хэш не входит: иначе
+    любое изменение цены гнало бы карточку на повторную модерацию. Считаем от того
+    же, что уходит в build_card, но с обнулённой ценой и выкинутым блоком sizes.
+    """
+    card = build_card(product, Decimal("1"))
+    for variant in card.get("variants", []):
+        variant.pop("sizes", None)
+    payload = json.dumps(card, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode()).hexdigest()

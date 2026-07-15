@@ -127,6 +127,7 @@ class ProductOut(BaseModel):
     min_price: Decimal | None
     price_rozn: Decimal | None
     integration_status: str
+    sync_blocked: bool = False
     integrations: list[ProductLinkOut] = []
 
 
@@ -176,12 +177,21 @@ class IntegrateRequest(BaseModel):
     platforms: list[str] = Field(min_length=1)  # ["wb"] | ["ozon"] | ["wb", "ozon"]
 
 
+class BlockRequest(BaseModel):
+    product_ids: list[int] = Field(min_length=1)
+    blocked: bool
+
+
 class SyncSettingsIn(BaseModel):
     """Интервал 0 = задача выключена."""
 
     catalog_interval_minutes: int = Field(ge=0, le=10080)
     stocks_interval_minutes: int = Field(ge=0, le=10080)
     push_interval_minutes: int = Field(ge=0, le=10080)
+    cards_update_interval_minutes: int = Field(ge=0, le=10080)
+    auto_mode: bool
+    auto_cards_interval_minutes: int = Field(ge=0, le=10080)
+    auto_cards_batch_limit: int = Field(ge=1, le=1000)
     missing_strategy: Literal["zero_stock", "delete"]
     stock_buffer: int = Field(ge=0, le=100000)
     wb_price_formula: str = Field(min_length=1, max_length=500)
@@ -195,6 +205,10 @@ class SyncSettingsOut(BaseModel):
     catalog_interval_minutes: int
     stocks_interval_minutes: int
     push_interval_minutes: int
+    cards_update_interval_minutes: int
+    auto_mode: bool
+    auto_cards_interval_minutes: int
+    auto_cards_batch_limit: int
     missing_strategy: str
     stock_buffer: int
     wb_price_formula: str
@@ -230,3 +244,10 @@ class SyncJobOut(BaseModel):
     message: str | None
     started_at: datetime
     finished_at: datetime | None
+
+
+class SyncJobPage(BaseModel):
+    items: list[SyncJobOut]
+    total: int
+    offset: int
+    limit: int

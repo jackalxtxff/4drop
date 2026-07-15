@@ -17,7 +17,7 @@ import json
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,11 +26,13 @@ from app.integrations.fourtochki.client import FourTochkiClient, FourTochkiError
 from app.models import (
     Credential,
     LogEntry,
+    MissingStrategy,
     Platform,
     Product,
     ProductStock,
     SyncJob,
 )
+from app.tasks.catalog_sync import get_or_create_settings
 from app.security import decrypt_secret
 from app.tasks.catalog_sync import recompute_aggregates
 
@@ -42,6 +44,10 @@ DB_CHUNK = 5000
 
 
 async def _upsert_stocks(session: AsyncSession, rows: list[dict]) -> None:
+    # Один порядок блокировки строк во всех прогонах: два параллельных upsert,
+    # трогающих одни и те же (product_id, wrh) в разной последовательности, иначе
+    # могут поймать deadlock. Сортировка делает порядок детерминированным.
+    rows = sorted(rows, key=lambda r: (r["product_id"], r["wrh"]))
     for i in range(0, len(rows), DB_CHUNK):
         chunk = rows[i : i + DB_CHUNK]
         stmt = insert(ProductStock).values(chunk)
@@ -110,6 +116,7 @@ async def sync_stocks(ctx: dict, supplier_id: int, job_id: int) -> None:
             return
 
         secrets = json.loads(decrypt_secret(cred.secrets_encrypted))
+        settings = await get_or_create_settings(session, supplier_id)
 
         id_by_cae = dict(
             (
@@ -154,6 +161,21 @@ async def sync_stocks(ctx: dict, supplier_id: int, job_id: int) -> None:
             await session.commit()
 
             zeroed = await _zero_stale(session, supplier_id, started)
+
+            # Товары, которых проценка не вернула ВООБЩЕ — 4tochki их больше не знает
+            # (сняты с ассортимента). Это авторитетный признак «пропал», в отличие от
+            # отсутствия в выдаче поиска. При стратегии delete — удаляем; при
+            # zero_stock их остатки уже обнулены выше (_zero_stale).
+            gone = [cae for cae in id_by_cae if cae not in {r.cae for r in rows}]
+            removed = 0
+            if gone and settings and settings.missing_strategy == MissingStrategy.DELETE:
+                res = await session.execute(
+                    delete(Product).where(
+                        Product.supplier_id == supplier_id, Product.cae.in_(gone)
+                    )
+                )
+                removed = res.rowcount or 0
+
             await recompute_aggregates(session, supplier_id, cred.selected_warehouses)
 
             elapsed = (datetime.now(UTC) - started).total_seconds()
@@ -163,6 +185,11 @@ async def sync_stocks(ctx: dict, supplier_id: int, job_id: int) -> None:
                 f"Обновлено позиций: {len(rows)} за {elapsed:.0f} с. "
                 f"Обнулено остатков: {zeroed}."
             )
+            if gone:
+                job.message += (
+                    f" Снято 4tochki: {len(gone)}"
+                    + (f" (удалено {removed})" if removed else " (остаток обнулён)")
+                )
             session.add(
                 LogEntry(
                     supplier_id=supplier_id,

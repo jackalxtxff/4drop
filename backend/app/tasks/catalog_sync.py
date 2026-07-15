@@ -266,6 +266,15 @@ async def recompute_aggregates(
 
     from sqlalchemy import text
 
+    # Транзакционный advisory-lock по поставщику: сериализует параллельные пересчёты
+    # (плановый sync_stocks + ручной, смена складов и т.п.). Массовый UPDATE products
+    # берёт блокировки строк в недетерминированном порядке, и два процесса ловят
+    # deadlock — лок этого не допускает. Освобождается сам в конце транзакции.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:supplier_id)"),
+        {"supplier_id": supplier_id},
+    )
+
     await session.execute(
         text(
             f"""
@@ -392,6 +401,9 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
                 return
 
             id_by_cae: dict[str, int] = {}
+            # Прогресс каталога считаем в СТРАНИЦАХ (processed и total в одних единицах):
+            # число товаров заранее неизвестно, а страницы даёт totalPages поиска.
+            pages_done = 0
 
             for finder, label in (
                 (client.find_tyres, "шины"),
@@ -401,7 +413,7 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
                 # последовательный обход 80+ страниц — это 80 круговых задержек подряд.
                 entries, reported = await finder(page=1)
                 total_pages = min(reported or 1, MAX_PAGES)
-                job.total += reported or 0
+                job.total += total_pages
                 await session.commit()
 
                 if total_pages > 1:
@@ -421,15 +433,18 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
                 log.info("4tochki %s: страниц %s, позиций %s", label, total_pages, len(entries))
 
                 id_by_cae |= await _upsert_entries(session, supplier_id, entries)
-                job.processed = len(id_by_cae)
+                pages_done += total_pages
+                job.processed = pages_done
                 await session.commit()
 
             await _enrich_attrs(session, client, id_by_cae)
             await session.commit()
 
-            removed = await _handle_missing(
-                session, supplier_id, set(id_by_cae), settings.missing_strategy
-            )
+            # Остатки пропавших из выдачи НЕ обнуляем здесь. Выдача поиска
+            # (GetFindTyre) нестабильна: пагинация по десяткам тысяч позиций и
+            # изменения каталога в реальном времени приводят к тому, что часть
+            # реально имеющихся товаров в неё не попадает. Обнуление/удаление —
+            # работа sync_stocks: проценка GetGoodsPriceRestByCode по коду точна.
             await recompute_aggregates(session, supplier_id, cred.selected_warehouses)
 
             elapsed = (datetime.now(UTC) - job.started_at).total_seconds()
@@ -437,12 +452,6 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
             job.status = "done"
             job.finished_at = datetime.now(UTC)
             job.message = f"Каталог обновлён: {len(id_by_cae)} позиций за {elapsed:.0f} с"
-            if removed:
-                action = (
-                    "удалено" if settings.missing_strategy == MissingStrategy.DELETE
-                    else "обнулён остаток"
-                )
-                job.message += f". Пропало из выдачи: {removed} ({action})"
             if not cred.selected_warehouses:
                 job.message += ". Склады не выбраны — остатки обнулены."
             await _log(session, supplier_id, job_id, "info", job.message)

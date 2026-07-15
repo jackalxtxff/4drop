@@ -159,6 +159,39 @@ class WBClient:
 
         return sent, errors
 
+    async def update_cards(self, variants: list[dict]) -> tuple[int, list[str]]:
+        """POST /content/v2/cards/update — обновление СУЩЕСТВУЮЩИХ карточек.
+
+        Отдельно от upload_cards: upload создаёт новые и падает с «vendor code
+        используется в других карточках», если артикул уже занят. update правит
+        существующую и требует nmID в каждом варианте.
+        """
+        updated = 0
+        errors: list[str] = []
+
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            for i in range(0, len(variants), self.UPLOAD_CHUNK):
+                chunk = variants[i : i + self.UPLOAD_CHUNK]
+                try:
+                    resp = await http.post(
+                        f"{self._content}/content/v2/cards/update",
+                        headers=self._headers,
+                        json=chunk,
+                    )
+                except httpx.HTTPError as exc:
+                    errors.append(f"сеть: {exc.__class__.__name__}")
+                    continue
+
+                if resp.status_code == 200 and not resp.json().get("error"):
+                    updated += len(chunk)
+                else:
+                    errors.append(f"HTTP {resp.status_code}: {_detail(resp)}")
+
+                if i + self.UPLOAD_CHUNK < len(variants):
+                    await asyncio.sleep(self.PAUSE_SECONDS)
+
+        return updated, errors
+
     async def cards_map(self) -> dict[str, dict]:
         """vendorCode → {nm_id, chrt_id, barcode} по всем карточкам кабинета.
 

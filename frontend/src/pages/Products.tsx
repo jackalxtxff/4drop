@@ -300,6 +300,21 @@ export function ProductsPage() {
     }
   };
 
+  const toggleBlock = async (blocked: boolean) => {
+    if (!supplierId || selected.size === 0) return;
+    setError(null);
+    try {
+      await api.post(`/suppliers/${supplierId}/products/block`, {
+        product_ids: [...selected],
+        blocked,
+      });
+      setSelected(new Set());
+      await fetchPage(1, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить блокировку");
+    }
+  };
+
   useEffect(() => {
     if (!job || !supplierId) return;
     if (job.status === "done" || job.status === "failed") return;
@@ -583,6 +598,22 @@ export function ProductsPage() {
             >
               Обе площадки
             </button>
+
+            <span className="mx-1 h-5 w-px bg-slate-200 dark:bg-slate-700" />
+
+            <button
+              onClick={() => void toggleBlock(true)}
+              title="Заблокированные товары не синхронизируются с маркетплейсами"
+              className="rounded-md border border-amber-300 px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950"
+            >
+              Заблокировать
+            </button>
+            <button
+              onClick={() => void toggleBlock(false)}
+              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+            >
+              Разблокировать
+            </button>
           </div>
         )}
       </div>
@@ -639,7 +670,7 @@ export function ProductsPage() {
                       onClick={() => toggle(p.id)}
                       className={`absolute left-0 grid w-full cursor-pointer ${GRID} items-center gap-3 border-b border-slate-100 px-4 text-sm hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/50 ${
                         checked ? "bg-slate-50 dark:bg-slate-800/50" : ""
-                      }`}
+                      } ${p.sync_blocked ? "opacity-50" : ""}`}
                       style={{ height: row.size, transform: `translateY(${row.start}px)` }}
                     >
                       <input
@@ -650,7 +681,12 @@ export function ProductsPage() {
                         className="accent-slate-900"
                       />
 
-                      <span className="truncate font-mono text-xs text-slate-600 dark:text-slate-400">
+                      <span className="flex items-center gap-1 truncate font-mono text-xs text-slate-600 dark:text-slate-400">
+                        {p.sync_blocked && (
+                          <span title="Заблокирован — не синхронизируется с маркетплейсами">
+                            🔒
+                          </span>
+                        )}
                         {p.cae}
                       </span>
 

@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, or_, select, update
 
 from app.config import get_settings
 from app.deps import SessionDep, SupplierDep
@@ -19,7 +19,9 @@ from app.models import (
     SyncSettings,
 )
 from app.stock import marketplace_stock
+from app.tasks.enqueue import enqueue_kind
 from app.schemas import (
+    BlockRequest,
     IntegrateRequest,
     ProductFacets,
     ProductOut,
@@ -226,6 +228,32 @@ async def list_products(
     )
 
 
+@router.post("/block", status_code=status.HTTP_200_OK)
+async def block_products(
+    payload: BlockRequest, supplier: SupplierDep, session: SessionDep
+) -> dict:
+    """Заблокировать/разблокировать товары для синхронизации с маркетплейсами.
+
+    Заблокированный товар не создаётся и не обновляется на площадках, а его остаток
+    там форсится в 0 при ближайшем пуше — блокировка сильнее и авто-, и ручного режима.
+    """
+    result = await session.execute(
+        update(Product)
+        .where(
+            Product.supplier_id == supplier.id,
+            Product.id.in_(payload.product_ids),
+        )
+        .values(sync_blocked=payload.blocked)
+    )
+    await session.commit()
+
+    # Сразу пушим: заблокированным обнулит остаток на маркетплейсе, разблокированным
+    # вернёт реальный — не дожидаясь планового пуша.
+    await enqueue_kind(session, supplier.id, "push")
+
+    return {"updated": result.rowcount or 0, "blocked": payload.blocked}
+
+
 @router.get("/facets", response_model=ProductFacets)
 async def facets(supplier: SupplierDep, session: SessionDep) -> ProductFacets:
     async def distinct(column) -> list:
@@ -364,7 +392,9 @@ async def integrate(
         (
             await session.execute(
                 select(Product.id).where(
-                    Product.supplier_id == supplier.id, Product.id.in_(payload.product_ids)
+                    Product.supplier_id == supplier.id,
+                    Product.id.in_(payload.product_ids),
+                    Product.sync_blocked.is_(False),
                 )
             )
         )

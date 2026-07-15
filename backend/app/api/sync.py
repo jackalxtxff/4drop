@@ -1,6 +1,8 @@
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, HTTPException, status
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.config import get_settings
@@ -11,10 +13,12 @@ from app.schemas import (
     FormulaPreviewIn,
     FormulaPreviewOut,
     SyncJobOut,
+    SyncJobPage,
     SyncSettingsIn,
     SyncSettingsOut,
 )
 from app.tasks.catalog_sync import get_or_create_settings
+from app.tasks.enqueue import enqueue_kind
 
 router = APIRouter(prefix="/suppliers/{supplier_id}/sync", tags=["sync"])
 
@@ -23,6 +27,8 @@ KINDS = {
     "catalog": "sync_catalog",
     "stocks": "sync_stocks",
     "push": "push_marketplaces",
+    "cards_update": "update_cards",
+    "auto_cards": "auto_cards",
 }
 
 
@@ -51,10 +57,31 @@ async def set_sync_settings(
             )
 
     settings = await get_or_create_settings(session, supplier.id)
+
+    # Что поменялось — чтобы решить, нужен ли немедленный пуш. Цена и буфер влияют
+    # на то, что уже стоит на витрине, поэтому применяем сразу, не дожидаясь расписания.
+    price_before = (
+        settings.wb_price_formula,
+        settings.ozon_price_formula,
+        settings.wb_price_before_formula,
+        settings.ozon_price_before_formula,
+    )
+    buffer_before = settings.stock_buffer
+
     for field, value in payload.model_dump().items():
         setattr(settings, field, value)
     await session.commit()
     await session.refresh(settings)
+
+    price_changed = price_before != (
+        settings.wb_price_formula,
+        settings.ozon_price_formula,
+        settings.wb_price_before_formula,
+        settings.ozon_price_before_formula,
+    )
+    if price_changed or settings.stock_buffer != buffer_before:
+        await enqueue_kind(session, supplier.id, "push")
+
     return settings
 
 
@@ -106,12 +133,34 @@ async def run_now(kind: str, supplier: SupplierDep, session: SessionDep) -> Sync
     return job
 
 
-@router.get("/jobs", response_model=list[SyncJobOut])
-async def list_jobs(supplier: SupplierDep, session: SessionDep) -> list[SyncJob]:
-    stmt = (
-        select(SyncJob)
-        .where(SyncJob.supplier_id == supplier.id)
-        .order_by(SyncJob.started_at.desc())
-        .limit(50)
+@router.get("/jobs", response_model=SyncJobPage)
+async def list_jobs(
+    supplier: SupplierDep,
+    session: SessionDep,
+    kind: Annotated[str | None, Query()] = None,
+    job_status: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> SyncJobPage:
+    """Журнал задач с пагинацией и фильтрами по типу и статусу."""
+    base = select(SyncJob).where(SyncJob.supplier_id == supplier.id)
+    if kind:
+        base = base.where(SyncJob.kind == kind)
+    if job_status:
+        base = base.where(SyncJob.status == job_status)
+
+    total = await session.scalar(
+        select(func.count()).select_from(base.subquery())
     )
-    return list((await session.execute(stmt)).scalars().all())
+    rows = (
+        await session.execute(
+            base.order_by(SyncJob.started_at.desc()).offset(offset).limit(limit)
+        )
+    ).scalars().all()
+
+    return SyncJobPage(
+        items=[SyncJobOut.model_validate(j) for j in rows],
+        total=total or 0,
+        offset=offset,
+        limit=limit,
+    )

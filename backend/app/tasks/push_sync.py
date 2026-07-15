@@ -92,7 +92,16 @@ async def push_wb(
     stock_items: list[dict] = []
     no_price = 0
 
+    blocked = 0
     for link, product in rows:
+        # Заблокированный товар: цену и атрибуты не трогаем, остаток форсим в 0 —
+        # чтобы карточка не продавала снятое с продажи, но и не пересоздавалась.
+        if product.sync_blocked:
+            blocked += 1
+            if link.barcode:
+                stock_items.append({"sku": link.barcode, "amount": 0})
+            continue
+
         price = (
             evaluate(price_formula, product.min_price, product.price_rozn, product.weight)
             if product.min_price
@@ -157,6 +166,8 @@ async def push_wb(
     parts = [f"[{env}] {priced_msg}", f"остатки: {stocked}/{len(stock_items)}"]
     if buffer:
         parts.append(f"буфер {buffer}")
+    if blocked:
+        parts.append(f"заблокировано (остаток 0): {blocked}")
     if no_price:
         parts.append(f"без цены: {no_price}")
     if price_err:

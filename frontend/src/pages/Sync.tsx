@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, type SyncJob, type SyncSettings } from "../api";
 import { useSupplier } from "../components/Layout";
@@ -42,6 +42,8 @@ const KIND_LABEL: Record<string, string> = {
   stocks: "Цены и остатки",
   push: "Отправка на площадки",
   cards: "Создание карточек",
+  cards_update: "Обновление карточек",
+  auto_cards: "Авто-создание карточек",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -114,31 +116,113 @@ export function SyncPage() {
 
   const [settings, setSettings] = useState<SyncSettings | null>(null);
   const [draft, setDraft] = useState<SyncSettings | null>(null);
-  const [jobs, setJobs] = useState<SyncJob[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Журнал задач: пагинация + фильтры. Держим отдельно от настроек.
+  const [jobs, setJobs] = useState<SyncJob[]>([]);
+  const [jobsTotal, setJobsTotal] = useState(0);
+  const [jobKind, setJobKind] = useState("");
+  const [jobStatus, setJobStatus] = useState("");
+  const [jobLimit, setJobLimit] = useState(20);
+  const [jobsLoading, setJobsLoading] = useState(false);
+
+  // Активные задачи (в очереди/выполняются) — для состояния кнопок «Запустить»,
+  // НЕзависимо от фильтров журнала: иначе фильтр по типу сломал бы индикацию.
+  const [activeKinds, setActiveKinds] = useState<Set<string>>(new Set());
+
+  // Автоподгрузка журнала при прокрутке — как в таблице товаров.
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  const refreshActive = useCallback(async () => {
+    if (!supplierId) return;
+    const page = await api.get<import("../api").SyncJobPage>(
+      `/suppliers/${supplierId}/sync/jobs?limit=30`,
+    );
+    setActiveKinds(
+      new Set(
+        page.items
+          .filter((j) => j.status === "running" || j.status === "queued")
+          .map((j) => j.kind),
+      ),
+    );
+  }, [supplierId]);
+
+  const jobsQuery = useCallback(
+    (offset: number) => {
+      const p = new URLSearchParams();
+      if (jobKind) p.set("kind", jobKind);
+      if (jobStatus) p.set("job_status", jobStatus);
+      p.set("limit", String(jobLimit));
+      p.set("offset", String(offset));
+      return p.toString();
+    },
+    [jobKind, jobStatus, jobLimit],
+  );
+
+  const loadJobs = useCallback(
+    async (append: boolean) => {
+      if (!supplierId) return;
+      setJobsLoading(true);
+      try {
+        const offset = append ? jobs.length : 0;
+        const page = await api.get<import("../api").SyncJobPage>(
+          `/suppliers/${supplierId}/sync/jobs?${jobsQuery(offset)}`,
+        );
+        setJobsTotal(page.total);
+        setJobs((prev) => (append ? [...prev, ...page.items] : page.items));
+      } finally {
+        setJobsLoading(false);
+      }
+    },
+    // jobs.length сознательно не в зависимостях: append читает его на момент вызова.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [supplierId, jobsQuery],
+  );
+
   const load = useCallback(async () => {
     if (!supplierId) return;
-    const [s, j] = await Promise.all([
-      api.get<SyncSettings>(`/suppliers/${supplierId}/sync/settings`),
-      api.get<SyncJob[]>(`/suppliers/${supplierId}/sync/jobs`),
-    ]);
+    const s = await api.get<SyncSettings>(`/suppliers/${supplierId}/sync/settings`);
     setSettings(s);
     setDraft(s);
-    setJobs(j);
   }, [supplierId]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    void refreshActive();
+  }, [load, refreshActive]);
 
-  // Пока что-то выполняется, подтягиваем журнал: иначе прогресс замрёт на экране.
+  // Первая страница журнала и перезагрузка при смене фильтров.
   useEffect(() => {
-    if (!jobs.some((j) => j.status === "running" || j.status === "queued")) return;
-    const t = setInterval(() => void load(), 3000);
+    void loadJobs(false);
+  }, [loadJobs]);
+
+  // Пока что-то выполняется, обновляем журнал и индикатор кнопок.
+  useEffect(() => {
+    if (activeKinds.size === 0) return;
+    const t = setInterval(() => {
+      void loadJobs(false);
+      void refreshActive();
+    }, 3000);
     return () => clearInterval(t);
-  }, [jobs, load]);
+  }, [activeKinds, loadJobs, refreshActive]);
+
+  // Догружаем следующую порцию журнала, когда «сентинел» под таблицей попадает
+  // в область видимости — бесконечная прокрутка вместо кнопки «показать ещё».
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && !jobsLoading && jobs.length < jobsTotal) {
+          void loadJobs(true);
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [jobsLoading, jobs.length, jobsTotal, loadJobs]);
 
   const dirty =
     draft && settings && JSON.stringify(draft) !== JSON.stringify(settings);
@@ -152,6 +236,10 @@ export function SyncPage() {
         catalog_interval_minutes: draft.catalog_interval_minutes,
         stocks_interval_minutes: draft.stocks_interval_minutes,
         push_interval_minutes: draft.push_interval_minutes,
+        cards_update_interval_minutes: draft.cards_update_interval_minutes,
+        auto_mode: draft.auto_mode,
+        auto_cards_interval_minutes: draft.auto_cards_interval_minutes,
+        auto_cards_batch_limit: draft.auto_cards_batch_limit,
         missing_strategy: draft.missing_strategy,
         stock_buffer: draft.stock_buffer,
         wb_price_formula: draft.wb_price_formula,
@@ -173,14 +261,16 @@ export function SyncPage() {
     setError(null);
     try {
       await api.post(`/suppliers/${supplierId}/sync/run/${kind}`);
-      await load();
+      // Сразу перечитываем: новая задача появляется «в очереди», кнопка меняет вид
+      // и включается поллинг прогресса. Без этого до F5 ничего не менялось.
+      await Promise.all([loadJobs(false), refreshActive()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось запустить");
     }
   };
 
-  const isRunning = (kind: string) =>
-    jobs.some((j) => j.kind === kind && (j.status === "running" || j.status === "queued"));
+  // Индикатор кнопок — по активным задачам, а не по (возможно отфильтрованному) журналу.
+  const isRunning = (kind: string) => activeKinds.has(kind);
 
   if (!draft) return <p className="text-sm text-slate-500">Загружаем…</p>;
 
@@ -235,6 +325,100 @@ export function SyncPage() {
           onRun={() => void run("push")}
           running={isRunning("push")}
         />
+
+        <Row
+          title="Обновление карточек"
+          hint="Досылает на площадку изменившиеся атрибуты (характеристики, название, картинки). Отправляет только то, что реально изменилось в 4tochki — каждое обновление проходит модерацию, поэтому редко."
+          value={draft.cards_update_interval_minutes}
+          onChange={(v) => setDraft({ ...draft, cards_update_interval_minutes: v })}
+          onRun={() => void run("cards_update")}
+          running={isRunning("cards_update")}
+        />
+      </section>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="font-semibold tracking-tight">Автоматический режим</h2>
+            <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+              Товар, появившийся <b>в наличии</b> и ещё не заведённый на Wildberries,
+              система сама создаст карточкой. Весь каталог с нулями не заливается —
+              только то, что реально есть на складе. Заблокированные товары не трогаются.
+            </p>
+          </div>
+
+          {/* Тумблер авто-режима. */}
+          <button
+            type="button"
+            onClick={() => setDraft({ ...draft, auto_mode: !draft.auto_mode })}
+            className={`relative mt-1 h-6 w-11 shrink-0 rounded-full transition ${
+              draft.auto_mode ? "bg-slate-900 dark:bg-slate-100" : "bg-slate-300 dark:bg-slate-700"
+            }`}
+            aria-pressed={draft.auto_mode}
+            aria-label="Автоматический режим"
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition dark:bg-slate-900 ${
+                draft.auto_mode ? "left-[1.375rem]" : "left-0.5"
+              }`}
+            />
+          </button>
+        </div>
+
+        {draft.auto_mode && (
+          <div className="mt-4 flex flex-wrap items-end gap-4 border-t border-slate-100 pt-4 dark:border-slate-800">
+            <div>
+              <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
+                Проверять новинки
+              </label>
+              <select
+                value={draft.auto_cards_interval_minutes}
+                onChange={(e) =>
+                  setDraft({ ...draft, auto_cards_interval_minutes: Number(e.target.value) })
+                }
+                className="mt-1 w-40 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+              >
+                {INTERVALS.filter((i) => i.value > 0).map((i) => (
+                  <option key={i.value} value={i.value}>
+                    {i.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
+                Карточек за один проход
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                value={draft.auto_cards_batch_limit}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    auto_cards_batch_limit: Math.max(1, Number(e.target.value) || 1),
+                  })
+                }
+                className="mt-1 w-28 rounded-md border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
+            </div>
+
+            <p className="pb-2 text-xs text-slate-500 dark:text-slate-400">
+              Лимит бережёт от rate limit WB и завала модерации: за проход создаётся
+              не больше указанного, остальное — в следующий.
+            </p>
+
+            <button
+              onClick={() => void run("auto_cards")}
+              disabled={isRunning("auto_cards")}
+              className="ml-auto rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:hover:bg-slate-800"
+            >
+              {isRunning("auto_cards") ? "Выполняется…" : "Запустить сейчас"}
+            </button>
+          </div>
+        )}
       </section>
 
       <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
@@ -441,7 +625,7 @@ export function SyncPage() {
           disabled={!dirty || saving}
           className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900"
         >
-          {saving ? "Сохраняем…" : "Сохранить расписание"}
+          {saving ? "Сохраняем…" : "Сохранить настройки"}
         </button>
         {dirty && (
           <button
@@ -454,56 +638,130 @@ export function SyncPage() {
       </div>
 
       <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-        <h2 className="font-semibold tracking-tight">Журнал задач</h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-semibold tracking-tight">
+            Журнал задач{" "}
+            <span className="font-normal text-slate-400">({jobsTotal})</span>
+          </h2>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={jobKind}
+              onChange={(e) => setJobKind(e.target.value)}
+              className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
+            >
+              <option value="">Все задачи</option>
+              {Object.entries(KIND_LABEL).map(([k, label]) => (
+                <option key={k} value={k}>
+                  {label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={jobStatus}
+              onChange={(e) => setJobStatus(e.target.value)}
+              className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
+            >
+              <option value="">Любой статус</option>
+              {Object.entries(STATUS_LABEL).map(([k, label]) => (
+                <option key={k} value={k}>
+                  {label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={jobLimit}
+              onChange={(e) => setJobLimit(Number(e.target.value))}
+              title="Сколько показывать"
+              className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
+            >
+              {[10, 20, 50, 100].map((n) => (
+                <option key={n} value={n}>
+                  по {n}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
 
         {jobs.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
-            Задач ещё не было.
+            {jobKind || jobStatus ? "Под фильтры ничего не подошло." : "Задач ещё не было."}
           </p>
         ) : (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[720px] text-sm">
-              <thead>
-                <tr className="border-b border-slate-200 text-left text-xs font-medium text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                  <th className="pb-2 pr-4">Задача</th>
-                  <th className="pb-2 pr-4">Статус</th>
-                  <th className="pb-2 pr-4">Запуск</th>
-                  <th className="pb-2 pr-4">Прогресс</th>
-                  <th className="pb-2">Результат</th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map((j) => (
-                  <tr
-                    key={j.id}
-                    className="border-b border-slate-100 last:border-0 dark:border-slate-800"
-                  >
-                    <td className="py-2 pr-4 whitespace-nowrap">
-                      {KIND_LABEL[j.kind] ?? j.kind}
-                    </td>
-                    <td className="py-2 pr-4">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs ${
-                          STATUS_STYLE[j.status] ?? STATUS_STYLE.queued
-                        }`}
-                      >
-                        {STATUS_LABEL[j.status] ?? j.status}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 whitespace-nowrap text-slate-500 dark:text-slate-400">
-                      {new Date(j.started_at).toLocaleString("ru")}
-                    </td>
-                    <td className="py-2 pr-4 tabular-nums text-slate-500 dark:text-slate-400">
-                      {j.total > 0 ? `${j.processed} / ${j.total}` : "—"}
-                    </td>
-                    <td className="py-2 text-slate-500 dark:text-slate-400">
-                      {j.message ?? "—"}
-                    </td>
+          <>
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left text-xs font-medium text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                    <th className="pb-2 pr-4">Задача</th>
+                    <th className="pb-2 pr-4">Статус</th>
+                    <th className="pb-2 pr-4">Запуск</th>
+                    <th className="pb-2 pr-4">Длительность</th>
+                    <th className="pb-2 pr-4">Прогресс</th>
+                    <th className="pb-2">Результат</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {jobs.map((j) => {
+                    const dur =
+                      j.finished_at != null
+                        ? Math.round(
+                            (new Date(j.finished_at).getTime() -
+                              new Date(j.started_at).getTime()) /
+                              1000,
+                          )
+                        : null;
+                    return (
+                      <tr
+                        key={j.id}
+                        className="border-b border-slate-100 last:border-0 dark:border-slate-800"
+                      >
+                        <td className="py-2 pr-4 whitespace-nowrap">
+                          {KIND_LABEL[j.kind] ?? j.kind}
+                        </td>
+                        <td className="py-2 pr-4">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs ${
+                              STATUS_STYLE[j.status] ?? STATUS_STYLE.queued
+                            }`}
+                          >
+                            {STATUS_LABEL[j.status] ?? j.status}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-4 whitespace-nowrap text-slate-500 dark:text-slate-400">
+                          {new Date(j.started_at).toLocaleString("ru")}
+                        </td>
+                        <td className="py-2 pr-4 whitespace-nowrap tabular-nums text-slate-500 dark:text-slate-400">
+                          {dur != null ? `${dur} с` : "—"}
+                        </td>
+                        <td className="py-2 pr-4 tabular-nums text-slate-500 dark:text-slate-400">
+                          {/* Прогресс осмыслен только пока задача идёт; у завершённой
+                              есть итоговое сообщение. */}
+                          {(j.status === "running" || j.status === "queued") &&
+                          j.total > 0
+                            ? `${j.processed} / ${j.total}`
+                            : "—"}
+                        </td>
+                        <td className="py-2 text-slate-500 dark:text-slate-400">
+                          {j.message ?? "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Сентинел автоподгрузки: пока он виден и есть ещё записи — грузим. */}
+            {jobs.length < jobsTotal && (
+              <div ref={sentinelRef} className="mt-4 text-center text-sm text-slate-400">
+                {jobsLoading ? "Загружаем…" : `Ещё ${jobsTotal - jobs.length}`}
+              </div>
+            )}
+          </>
         )}
       </section>
     </div>

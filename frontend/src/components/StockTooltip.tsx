@@ -5,6 +5,9 @@ import { api, type ProductStock } from "../api";
 interface Props {
   supplierId: number;
   productId: number;
+  totalRest: number;
+  marketplaceRest: number;
+  buffer: number;
   top: number;
   left: number;
 }
@@ -13,7 +16,15 @@ interface Props {
 // наведение мыши: без кэша каждый проход курсором по колонке бил бы в API.
 const cache = new Map<number, ProductStock[]>();
 
-export function StockTooltip({ supplierId, productId, top, left }: Props) {
+export function StockTooltip({
+  supplierId,
+  productId,
+  totalRest,
+  marketplaceRest,
+  buffer,
+  top,
+  left,
+}: Props) {
   const [stocks, setStocks] = useState<ProductStock[] | null>(
     () => cache.get(productId) ?? null,
   );
@@ -93,6 +104,22 @@ export function StockTooltip({ supplierId, productId, top, left }: Props) {
               </table>
             </>
           )}
+
+          {/* Итог по выбранным складам с учётом буфера — именно столько уйдёт на МП. */}
+          <div className="mt-2 flex items-center justify-between border-t border-slate-200 pt-2 text-xs dark:border-slate-700">
+            <span className="text-slate-500 dark:text-slate-400">
+              На маркетплейс{buffer > 0 ? ` (буфер ${buffer})` : ""}:
+            </span>
+            <span
+              className={`font-semibold tabular-nums ${
+                marketplaceRest > 0
+                  ? "text-slate-900 dark:text-slate-100"
+                  : "text-amber-600 dark:text-amber-400"
+              }`}
+            >
+              {marketplaceRest} из {totalRest}
+            </span>
+          </div>
         </>
       )}
     </div>

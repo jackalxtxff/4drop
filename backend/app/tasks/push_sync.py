@@ -1,0 +1,209 @@
+"""Отправка цен и остатков на маркетплейсы.
+
+Реализован Wildberries. Ozon — следующий шаг.
+
+Отправляем только по товарам с активной карточкой (ProductLink.status == active):
+у карточки на модерации ещё нет рабочего nmID/баркода, слать остаток некуда.
+
+Цена = закупочная с наценкой (pricing_rules). Остаток = реальный минус буфер
+(stock.marketplace_stock) — та же формула, что показывает витрина.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import SessionLocal
+from app.integrations.wb.client import WBClient, WBError
+from app.models import (
+    Credential,
+    IntegrationStatus,
+    LogEntry,
+    Platform,
+    Product,
+    ProductLink,
+    SyncJob,
+    SyncSettings,
+)
+from app.formula import FormulaError, compile_formula, evaluate
+from app.security import decrypt_secret
+from app.stock import marketplace_stock
+
+
+async def _wb_credential(session: AsyncSession, supplier_id: int) -> Credential | None:
+    return (
+        await session.execute(
+            select(Credential).where(
+                Credential.supplier_id == supplier_id,
+                Credential.platform == Platform.WB,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def push_wb(
+    session: AsyncSession, supplier_id: int, job: SyncJob
+) -> tuple[str, str]:
+    """Возвращает (level, message) для лога и статуса задачи."""
+    cred = await _wb_credential(session, supplier_id)
+    if cred is None or not cred.secrets_encrypted:
+        return "error", "Доступы к Wildberries не заданы"
+
+    api_key = json.loads(decrypt_secret(cred.secrets_encrypted))["api_key"]
+
+    settings = (
+        await session.execute(
+            select(SyncSettings).where(SyncSettings.supplier_id == supplier_id)
+        )
+    ).scalar_one_or_none()
+    buffer = settings.stock_buffer if settings else 0
+
+    # Формулы WB — цена продажи и цена до скидки, компилируем по разу на пачку.
+    try:
+        price_formula = compile_formula(settings.wb_price_formula if settings else "purchase")
+        before_formula = compile_formula(
+            settings.wb_price_before_formula if settings else "price"
+        )
+    except FormulaError as exc:
+        return "error", f"Формула цены WB некорректна: {exc}"
+
+    # Активные карточки WB + их товары.
+    rows = (
+        await session.execute(
+            select(ProductLink, Product)
+            .join(Product, Product.id == ProductLink.product_id)
+            .where(
+                ProductLink.supplier_id == supplier_id,
+                ProductLink.platform == Platform.WB,
+                ProductLink.status == IntegrationStatus.ACTIVE,
+            )
+        )
+    ).all()
+
+    if not rows:
+        return "info", "Нет активных карточек WB — отправлять нечего"
+
+    price_items: list[dict] = []
+    stock_items: list[dict] = []
+    no_price = 0
+
+    for link, product in rows:
+        price = (
+            evaluate(price_formula, product.min_price, product.price_rozn, product.weight)
+            if product.min_price
+            else None
+        )
+
+        if link.nm_id and price:
+            # Цена до скидки считается от нашей цены (переменная price/wb_price).
+            before = evaluate(
+                before_formula,
+                product.min_price,
+                product.price_rozn,
+                product.weight,
+                price=price,
+            )
+            # Если формула дала цену до скидки ниже нашей — скидки просто нет.
+            before_int = max(int(before or 0), int(price))
+            discount = WBClient.discount_percent(before_int, int(price))
+            price_items.append(
+                {"nmID": link.nm_id, "price": before_int, "discount": discount}
+            )
+        elif not price:
+            no_price += 1
+
+        if link.barcode:
+            stock_items.append(
+                {"sku": link.barcode, "amount": marketplace_stock(product.total_rest, buffer)}
+            )
+
+    client = WBClient(api_key)
+
+    # Отправляем только изменившиеся цены: WB валит весь батч, если хоть одна цена
+    # в нём совпадает с текущей. Без этого один неизменённый товар блокирует остальные.
+    current = await client.current_prices()
+    changed = [
+        it
+        for it in price_items
+        if current.get(it["nmID"]) != (it["price"], it["discount"])
+    ]
+    up_to_date = len(price_items) - len(changed)
+
+    priced, price_err = await client.update_prices(changed)
+
+    # Склад продавца нужен один раз — запоминаем в credential.
+    warehouse_id = (cred.settings or {}).get("warehouse_id")
+    stock_err: str | None = None
+    stocked = 0
+    try:
+        if warehouse_id is None:
+            warehouse_id = await client.ensure_warehouse()
+            cred.settings = {**(cred.settings or {}), "warehouse_id": warehouse_id}
+        stocked, stock_err = await client.update_stocks(warehouse_id, stock_items)
+    except WBError as exc:
+        stock_err = str(exc)
+
+    job.processed = priced + stocked
+
+    env = "песочница WB" if client.sandbox else "боевой кабинет WB"
+    priced_msg = f"Цены: обновлено {priced}"
+    if up_to_date:
+        priced_msg += f", уже актуальны {up_to_date}"
+    parts = [f"[{env}] {priced_msg}", f"остатки: {stocked}/{len(stock_items)}"]
+    if buffer:
+        parts.append(f"буфер {buffer}")
+    if no_price:
+        parts.append(f"без цены: {no_price}")
+    if price_err:
+        parts.append(f"ошибка цен: {price_err}")
+    if stock_err:
+        parts.append(f"ошибка остатков: {stock_err}")
+
+    # Красным помечаем, только если ничего не удалось И при этом были явные ошибки.
+    # «Все цены уже актуальны, остатки без изменений» — это норма, а не провал.
+    something_done = priced > 0 or stocked > 0 or up_to_date > 0
+    has_error = bool(price_err or stock_err)
+    level = "error" if (not something_done and has_error) else "info"
+    return level, ". ".join(parts)
+
+
+async def push_marketplaces(ctx: dict, supplier_id: int, job_id: int) -> None:
+    async with SessionLocal() as session:
+        job = await session.get(SyncJob, job_id)
+        if job is None:
+            return
+
+        job.status = "running"
+        await session.commit()
+
+        try:
+            level, message = await push_wb(session, supplier_id, job)
+
+            job.status = "done" if level == "info" else "failed"
+            job.message = message
+            job.finished_at = datetime.now(UTC)
+            session.add(
+                LogEntry(
+                    supplier_id=supplier_id,
+                    job_id=job_id,
+                    level=level,
+                    platform=Platform.WB,
+                    message=message,
+                )
+            )
+            await session.commit()
+
+        except Exception as exc:  # noqa: BLE001 — иначе задача зависнет в «running»
+            await session.rollback()
+            job = await session.get(SyncJob, job_id)
+            if job:
+                job.status = "failed"
+                job.message = str(exc)[:500]
+                job.finished_at = datetime.now(UTC)
+                await session.commit()
+            raise

@@ -118,9 +118,18 @@ export interface Product {
   img_small: string | null;
   img_big: string | null;
   total_rest: number;
+  marketplace_rest: number;
   min_price: string | null;
   price_rozn: string | null;
   integration_status: "none" | "pending" | "active" | "rejected" | "error";
+  integrations: ProductLink[];
+}
+
+export interface ProductLink {
+  platform: "wb" | "ozon";
+  status: "none" | "pending" | "active" | "rejected" | "error";
+  status_message: string | null;
+  nm_id: number | null;
 }
 
 export interface ProductPage {
@@ -130,6 +139,7 @@ export interface ProductPage {
   page_size: number;
   in_stock_count: number;
   total_rest: number;
+  stock_buffer: number;
 }
 
 export interface Facets {
@@ -169,6 +179,25 @@ export type SortField =
   | "total_rest"
   | "min_price"
   | "integration_status";
+
+export interface SyncSettings {
+  catalog_interval_minutes: number;
+  stocks_interval_minutes: number;
+  push_interval_minutes: number;
+  missing_strategy: "zero_stock" | "delete";
+  stock_buffer: number;
+  wb_price_formula: string;
+  ozon_price_formula: string;
+  wb_price_before_formula: string;
+  ozon_price_before_formula: string;
+  updated_at: string;
+}
+
+export interface FormulaPreview {
+  ok: boolean;
+  price: string | null;
+  error: string | null;
+}
 
 export interface SyncJob {
   id: number;

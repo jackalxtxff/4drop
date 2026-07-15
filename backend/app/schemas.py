@@ -1,6 +1,8 @@
 from datetime import datetime
 from decimal import Decimal
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -54,9 +56,9 @@ class FourTochkiCredentialIn(BaseModel):
 
 
 class WBCredentialIn(BaseModel):
-    content: str | None = None
-    prices: str | None = None
-    marketplace: str | None = None
+    """У WB токен ОДИН: категории доступа отмечаются при его создании в кабинете."""
+
+    api_key: str
 
 
 class OzonCredentialIn(BaseModel):
@@ -87,6 +89,15 @@ class CredentialOut(BaseModel):
 # --- товары -----------------------------------------------------------------
 
 
+class ProductLinkOut(BaseModel):
+    """Связь товара с карточкой на одной площадке — для бейджей в таблице."""
+
+    platform: str
+    status: str
+    status_message: str | None = None
+    nm_id: int | None = None
+
+
 class ProductOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -110,9 +121,13 @@ class ProductOut(BaseModel):
     img_small: str | None
     img_big: str | None
     total_rest: int
+    # Остаток за вычетом буфера — столько уйдёт на маркетплейс. Считается на бэке,
+    # чтобы витрина и реальный пуш пользовались одной формулой.
+    marketplace_rest: int = 0
     min_price: Decimal | None
     price_rozn: Decimal | None
     integration_status: str
+    integrations: list[ProductLinkOut] = []
 
 
 class ProductStockOut(BaseModel):
@@ -136,6 +151,7 @@ class ProductPage(BaseModel):
     # выборкой, а не по всему каталогу.
     in_stock_count: int  # моделей с ненулевым остатком
     total_rest: int      # суммарный остаток в штуках
+    stock_buffer: int = 0  # текущий буфер поставщика — для подсказки в таблице
 
 
 class ProductFacets(BaseModel):
@@ -158,6 +174,49 @@ class IntegrateRequest(BaseModel):
     product_ids: list[int] | None = None
     select_all_matching: bool = False
     platforms: list[str] = Field(min_length=1)  # ["wb"] | ["ozon"] | ["wb", "ozon"]
+
+
+class SyncSettingsIn(BaseModel):
+    """Интервал 0 = задача выключена."""
+
+    catalog_interval_minutes: int = Field(ge=0, le=10080)
+    stocks_interval_minutes: int = Field(ge=0, le=10080)
+    push_interval_minutes: int = Field(ge=0, le=10080)
+    missing_strategy: Literal["zero_stock", "delete"]
+    stock_buffer: int = Field(ge=0, le=100000)
+    wb_price_formula: str = Field(min_length=1, max_length=500)
+    ozon_price_formula: str = Field(min_length=1, max_length=500)
+    wb_price_before_formula: str = Field(min_length=1, max_length=500)
+    ozon_price_before_formula: str = Field(min_length=1, max_length=500)
+
+
+class SyncSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    catalog_interval_minutes: int
+    stocks_interval_minutes: int
+    push_interval_minutes: int
+    missing_strategy: str
+    stock_buffer: int
+    wb_price_formula: str
+    ozon_price_formula: str
+    wb_price_before_formula: str
+    ozon_price_before_formula: str
+    updated_at: datetime
+
+
+class FormulaPreviewIn(BaseModel):
+    formula: str = Field(min_length=1, max_length=500)
+    purchase: Decimal = Decimal("5000")
+    rrp: Decimal = Decimal("0")
+    weight: Decimal = Decimal("0")
+    # Наша цена продажи — для формулы цены до скидки (переменная price/wb_price/ozon_price).
+    price: Decimal | None = None
+
+
+class FormulaPreviewOut(BaseModel):
+    ok: bool
+    price: Decimal | None = None
+    error: str | None = None
 
 
 class SyncJobOut(BaseModel):

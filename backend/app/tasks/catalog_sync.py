@@ -9,13 +9,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,11 +30,13 @@ from app.integrations.fourtochki.client import (
 from app.models import (
     Credential,
     LogEntry,
+    MissingStrategy,
     Platform,
     Product,
     ProductStock,
     Supplier,
     SyncJob,
+    SyncSettings,
 )
 from app.security import decrypt_secret
 
@@ -71,6 +74,11 @@ def _to_num(value: Any) -> Decimal | None:
         return None
 
 
+# Строк на один INSERT. У Postgres потолок 65 535 плейсхолдеров на запрос:
+# 11 000 товаров × 10 колонок = 110 000 параметров, и запрос падает.
+DB_CHUNK = 2000
+
+
 async def _upsert_entries(
     session: AsyncSession, supplier_id: int, entries: list[CatalogEntry]
 ) -> dict[str, int]:
@@ -78,40 +86,44 @@ async def _upsert_entries(
     if not entries:
         return {}
 
-    rows = [
-        {
-            "supplier_id": supplier_id,
-            "cae": e.cae,
-            "goods_type": e.goods_type,
-            "brand": e.brand,
-            "model": e.model,
-            "name": e.name,
-            "season": e.season,
-            "thorn": e.thorn,
-            "img_small": e.img_small,
-            "img_big": e.img_big,
-        }
-        for e in entries
-    ]
+    id_by_cae: dict[str, int] = {}
 
-    stmt = insert(Product).values(rows)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[Product.supplier_id, Product.cae],
-        set_={
-            "goods_type": stmt.excluded.goods_type,
-            "brand": stmt.excluded.brand,
-            "model": stmt.excluded.model,
-            "name": stmt.excluded.name,
-            "season": stmt.excluded.season,
-            "thorn": stmt.excluded.thorn,
-            "img_small": stmt.excluded.img_small,
-            "img_big": stmt.excluded.img_big,
-            "updated_at": datetime.now(UTC),
-        },
-    ).returning(Product.id, Product.cae)
+    for start in range(0, len(entries), DB_CHUNK):
+        batch = entries[start : start + DB_CHUNK]
+        rows = [
+            {
+                "supplier_id": supplier_id,
+                "cae": e.cae,
+                "goods_type": e.goods_type,
+                "brand": e.brand,
+                "model": e.model,
+                "name": e.name,
+                "season": e.season,
+                "thorn": e.thorn,
+                "img_small": e.img_small,
+                "img_big": e.img_big,
+            }
+            for e in batch
+        ]
 
-    result = await session.execute(stmt)
-    id_by_cae = {cae: pid for pid, cae in result.all()}
+        stmt = insert(Product).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[Product.supplier_id, Product.cae],
+            set_={
+                "goods_type": stmt.excluded.goods_type,
+                "brand": stmt.excluded.brand,
+                "model": stmt.excluded.model,
+                "name": stmt.excluded.name,
+                "season": stmt.excluded.season,
+                "thorn": stmt.excluded.thorn,
+                "img_small": stmt.excluded.img_small,
+                "img_big": stmt.excluded.img_big,
+                "updated_at": datetime.now(UTC),
+            },
+        ).returning(Product.id, Product.cae)
+
+        result = await session.execute(stmt)
+        id_by_cae.update({cae: pid for pid, cae in result.all()})
 
     stock_rows = [
         {
@@ -126,8 +138,9 @@ async def _upsert_entries(
         for w in e.warehouses
     ]
 
-    if stock_rows:
-        s = insert(ProductStock).values(stock_rows)
+    for start in range(0, len(stock_rows), DB_CHUNK * 2):
+        chunk = stock_rows[start : start + DB_CHUNK * 2]
+        s = insert(ProductStock).values(chunk)
         await session.execute(
             s.on_conflict_do_update(
                 index_elements=[ProductStock.product_id, ProductStock.wrh],
@@ -148,42 +161,90 @@ async def _enrich_attrs(
     client: FourTochkiClient,
     id_by_cae: dict[str, int],
 ) -> None:
-    """GetGoodsInfo добирает типоразмеры и индексы — без них карточку на МП не собрать."""
-    batch = get_settings().fourtochki_batch_size
-    codes = list(id_by_cae)
+    """GetGoodsInfo добирает типоразмеры и индексы — без них карточку на МП не собрать.
 
-    for start in range(0, len(codes), batch):
-        chunk = codes[start : start + batch]
-        items = await client.get_goods_info(chunk)
+    Запросы к API идут батчами по 2000 параллельно, запись в БД — одним executemany.
+    Раньше здесь был N+1: session.get(Product) на каждый из 22 000 товаров, то есть
+    22 000 отдельных SELECT.
+    """
+    if not id_by_cae:
+        return
 
-        for item in items:
-            product_id = id_by_cae.get(item.cae)
-            if product_id is None:
-                continue
-            a = item.attrs
-            product = await session.get(Product, product_id)
-            if product is None:
-                continue
+    items = await client.get_goods_info_all(list(id_by_cae))
 
-            product.attrs = a
-            # У дисков RimContainer.type — целое число (0/1/2), а не тип шины,
-            # поэтому заполняем только для шин, иначе фильтр забьётся мусором.
-            product.tyre_type = a.get("type") if item.goods_type == "tyre" else None
-            product.constr = a.get("constr")
-            product.camera = a.get("camera")
-            product.noise = a.get("noise")
-            product.strengthening = a.get("strengthening")
-            product.width = _to_num(a.get("width"))
-            product.height = _to_num(a.get("height"))
-            product.diameter = _to_num(a.get("diameter"))
-            product.load_index = a.get("load_index")
-            product.speed_index = a.get("speed_index")
-            product.weight = _to_num(a.get("weight"))
-            product.volume = _to_num(a.get("volume"))
-            product.tn_ved = a.get("tn_ved")
-            # Названия и картинки из GetGoodsInfo точнее, чем из поиска.
-            product.name = a.get("name") or product.name
-            product.img_big = a.get("img_big") or product.img_big
+    rows = []
+    for item in items:
+        product_id = id_by_cae.get(item.cae)
+        if product_id is None:
+            continue
+        a = item.attrs
+        rows.append(
+            {
+                "b_id": product_id,
+                "attrs": a,
+                # У дисков RimContainer.type — целое число (0/1/2), а не тип шины,
+                # поэтому заполняем только для шин, иначе фильтр забьётся мусором.
+                "tyre_type": a.get("type") if item.goods_type == "tyre" else None,
+                "constr": a.get("constr"),
+                "camera": a.get("camera"),
+                "noise": a.get("noise"),
+                "strengthening": a.get("strengthening"),
+                "width": _to_num(a.get("width")),
+                "height": _to_num(a.get("height")),
+                "diameter": _to_num(a.get("diameter")),
+                "load_index": a.get("load_index"),
+                "speed_index": a.get("speed_index"),
+                "weight": _to_num(a.get("weight")),
+                "volume": _to_num(a.get("volume")),
+                "tn_ved": a.get("tn_ved"),
+                "name": a.get("name"),
+                "img_big": a.get("img_big"),
+            }
+        )
+
+    if not rows:
+        return
+
+    from sqlalchemy import bindparam, update
+
+    # update(Product.__table__), а не update(Product): при executemany со списком
+    # словарей ORM трактует это как bulk-update по первичному ключу и требует id
+    # в каждой строке. Нам нужен обычный Core-UPDATE ... WHERE id = :b_id.
+    products = Product.__table__
+
+    stmt = (
+        update(products)
+        .where(products.c.id == bindparam("b_id"))
+        .values(
+            attrs=bindparam("attrs"),
+            tyre_type=bindparam("tyre_type"),
+            constr=bindparam("constr"),
+            camera=bindparam("camera"),
+            noise=bindparam("noise"),
+            strengthening=bindparam("strengthening"),
+            width=bindparam("width"),
+            height=bindparam("height"),
+            diameter=bindparam("diameter"),
+            load_index=bindparam("load_index"),
+            speed_index=bindparam("speed_index"),
+            weight=bindparam("weight"),
+            volume=bindparam("volume"),
+            tn_ved=bindparam("tn_ved"),
+            # Названия и картинки из GetGoodsInfo точнее, чем из поиска, но если
+            # там пусто — оставляем то, что уже есть.
+            name=func.coalesce(bindparam("name"), products.c.name),
+            img_big=func.coalesce(bindparam("img_big"), products.c.img_big),
+        )
+    )
+
+    for i in range(0, len(rows), 2000):
+        # synchronize_session=None обязателен: массовый UPDATE с WHERE по bindparam
+        # не умеет синхронизировать объекты сессии, и SQLAlchemy падает без этого.
+        await session.execute(
+            stmt,
+            rows[i : i + 2000],
+            execution_options={"synchronize_session": None},
+        )
 
 
 async def recompute_aggregates(
@@ -230,6 +291,58 @@ async def recompute_aggregates(
     )
 
 
+async def _handle_missing(
+    session: AsyncSession,
+    supplier_id: int,
+    seen_caes: set[str],
+    strategy: str,
+) -> int:
+    """Товары, которых не было в этой выгрузке.
+
+    Поиск 4tochki отдаёт только позиции с остатком, поэтому «пропал» обычно значит
+    «кончился», а не «снят с продажи» — удалять по умолчанию нельзя, иначе мы
+    снесём карточку у товара, который завтра вернётся на склад.
+    """
+    from sqlalchemy import delete, update
+
+    missing = (
+        await session.execute(
+            select(Product.id).where(
+                Product.supplier_id == supplier_id,
+                Product.cae.notin_(seen_caes) if seen_caes else True,
+            )
+        )
+    ).scalars().all()
+
+    if not missing:
+        return 0
+
+    if strategy == MissingStrategy.DELETE:
+        await session.execute(delete(Product).where(Product.id.in_(missing)))
+    else:
+        # ZERO_STOCK: карточку и маппинг на маркетплейс сохраняем, обнуляем только остаток.
+        await session.execute(
+            update(ProductStock)
+            .where(ProductStock.product_id.in_(missing))
+            .values(rest=0, updated_at=datetime.now(UTC))
+        )
+
+    return len(missing)
+
+
+async def get_or_create_settings(session: AsyncSession, supplier_id: int) -> SyncSettings:
+    result = await session.execute(
+        select(SyncSettings).where(SyncSettings.supplier_id == supplier_id)
+    )
+    settings = result.scalar_one_or_none()
+    if settings is None:
+        settings = SyncSettings(supplier_id=supplier_id)
+        session.add(settings)
+        await session.commit()
+        await session.refresh(settings)
+    return settings
+
+
 async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
     """arq-задача: полная выгрузка каталога поставщика."""
     async with SessionLocal() as session:
@@ -259,6 +372,7 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
             return
 
         secrets = json.loads(decrypt_secret(cred.secrets_encrypted))
+        settings = await get_or_create_settings(session, supplier_id)
 
         try:
             client = FourTochkiClient(secrets["login"], secrets["password"])
@@ -277,49 +391,64 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
                 await session.commit()
                 return
 
-            processed = 0
+            id_by_cae: dict[str, int] = {}
 
             for finder, label in (
                 (client.find_tyres, "шины"),
                 (client.find_rims, "диски"),
             ):
-                page = 1
-                total_pages = 1
+                # Первая страница нужна ради totalPages, остальные тянем параллельно:
+                # последовательный обход 80+ страниц — это 80 круговых задержек подряд.
+                entries, reported = await finder(page=1)
+                total_pages = min(reported or 1, MAX_PAGES)
+                job.total += reported or 0
+                await session.commit()
 
-                while page <= total_pages and page <= MAX_PAGES:
-                    entries, reported = await finder(page=page)
-                    if page == 1 and reported:
-                        total_pages = min(reported, MAX_PAGES)
-                        job.total += reported
+                if total_pages > 1:
+                    sem = asyncio.Semaphore(get_settings().fourtochki_concurrency)
 
-                    if not entries:
-                        break
+                    async def fetch(page: int, f=finder) -> list[CatalogEntry]:
+                        async with sem:
+                            rows, _ = await f(page=page)
+                            return rows
 
-                    id_by_cae = await _upsert_entries(session, supplier_id, entries)
-                    await _enrich_attrs(session, client, id_by_cae)
-
-                    processed += 1
-                    job.processed = processed
-                    await session.commit()
-
-                    log.info(
-                        "4tochki %s: страница %s/%s, позиций %s",
-                        label, page, total_pages, len(entries),
+                    rest = await asyncio.gather(
+                        *(fetch(p) for p in range(2, total_pages + 1))
                     )
-                    page += 1
+                    for page_entries in rest:
+                        entries.extend(page_entries)
 
+                log.info("4tochki %s: страниц %s, позиций %s", label, total_pages, len(entries))
+
+                id_by_cae |= await _upsert_entries(session, supplier_id, entries)
+                job.processed = len(id_by_cae)
+                await session.commit()
+
+            await _enrich_attrs(session, client, id_by_cae)
+            await session.commit()
+
+            removed = await _handle_missing(
+                session, supplier_id, set(id_by_cae), settings.missing_strategy
+            )
             await recompute_aggregates(session, supplier_id, cred.selected_warehouses)
 
+            elapsed = (datetime.now(UTC) - job.started_at).total_seconds()
             supplier.catalog_synced_at = datetime.now(UTC)
             job.status = "done"
             job.finished_at = datetime.now(UTC)
-            job.message = f"Каталог обновлён, страниц обработано: {processed}"
+            job.message = f"Каталог обновлён: {len(id_by_cae)} позиций за {elapsed:.0f} с"
+            if removed:
+                action = (
+                    "удалено" if settings.missing_strategy == MissingStrategy.DELETE
+                    else "обнулён остаток"
+                )
+                job.message += f". Пропало из выдачи: {removed} ({action})"
             if not cred.selected_warehouses:
                 job.message += ". Склады не выбраны — остатки обнулены."
             await _log(session, supplier_id, job_id, "info", job.message)
             await session.commit()
 
-        except FourTochkiError as exc:
+        except Exception as exc:  # noqa: BLE001 — иначе задача навсегда зависнет в «running»
             await session.rollback()
             job = await session.get(SyncJob, job_id)
             if job:

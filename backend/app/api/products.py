@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 
 from app.config import get_settings
 from app.deps import SessionDep, SupplierDep
@@ -13,9 +13,12 @@ from app.models import (
     IntegrationStatus,
     Platform,
     Product,
+    ProductLink,
     ProductStock,
     SyncJob,
+    SyncSettings,
 )
+from app.stock import marketplace_stock
 from app.schemas import (
     IntegrateRequest,
     ProductFacets,
@@ -51,7 +54,7 @@ def _apply_filters(
     in_stock: bool | None,
     price_min: Decimal | None,
     price_max: Decimal | None,
-    integration_status: list[str] | None,
+    integration: list[str] | None,
 ) -> Select:
     """Вся фильтрация — на сервере: каталог в десятки тысяч позиций на клиент не выгрузить."""
     if q:
@@ -88,8 +91,27 @@ def _apply_filters(
         stmt = stmt.where(Product.min_price >= price_min)
     if price_max is not None:
         stmt = stmt.where(Product.min_price <= price_max)
-    if integration_status:
-        stmt = stmt.where(Product.integration_status.in_(integration_status))
+    if integration:
+        # Фильтр по площадке, а не по общему статусу: «none» — нет ни одной активной
+        # карточки, «wb»/«ozon» — есть активная карточка на этой площадке.
+        # Значения объединяются по ИЛИ: «wb или ozon» = интегрирован хоть куда-то.
+        active_on = (
+            select(ProductLink.product_id)
+            .where(
+                ProductLink.product_id == Product.id,
+                ProductLink.status == IntegrationStatus.ACTIVE,
+            )
+        )
+        conditions = []
+        if "none" in integration:
+            conditions.append(~active_on.exists())
+        for platform in ("wb", "ozon"):
+            if platform in integration:
+                conditions.append(
+                    active_on.where(ProductLink.platform == platform).exists()
+                )
+        if conditions:
+            stmt = stmt.where(or_(*conditions))
     return stmt
 
 
@@ -110,7 +132,7 @@ async def list_products(
     in_stock: Annotated[bool | None, Query()] = None,
     price_min: Annotated[Decimal | None, Query()] = None,
     price_max: Annotated[Decimal | None, Query()] = None,
-    integration_status: Annotated[list[str] | None, Query()] = None,
+    integration: Annotated[list[str] | None, Query()] = None,
     sort: Annotated[SortField, Query()] = "cae",
     order: Annotated[Literal["asc", "desc"], Query()] = "asc",
     page: Annotated[int, Query(ge=1)] = 1,
@@ -130,8 +152,12 @@ async def list_products(
         in_stock=in_stock,
         price_min=price_min,
         price_max=price_max,
-        integration_status=integration_status,
+        integration=integration,
     )
+
+    buffer = await session.scalar(
+        select(SyncSettings.stock_buffer).where(SyncSettings.supplier_id == supplier.id)
+    ) or 0
 
     base = _apply_filters(select(Product).where(Product.supplier_id == supplier.id), **filters)
 
@@ -161,13 +187,42 @@ async def list_products(
     )
     rows = (await session.execute(stmt)).scalars().all()
 
+    # Линки на площадки — отдельным запросом по id страницы, а не join'ом:
+    # у товара их до двух, join размножил бы строки и сломал пагинацию.
+    links_by_product: dict[int, list[dict]] = {}
+    if rows:
+        link_rows = (
+            await session.execute(
+                select(ProductLink).where(
+                    ProductLink.product_id.in_([p.id for p in rows])
+                )
+            )
+        ).scalars().all()
+        for link in link_rows:
+            links_by_product.setdefault(link.product_id, []).append(
+                {
+                    "platform": link.platform,
+                    "status": link.status,
+                    "status_message": link.status_message,
+                    "nm_id": link.nm_id,
+                }
+            )
+
+    items = []
+    for p in rows:
+        item = ProductOut.model_validate(p)
+        item.integrations = links_by_product.get(p.id, [])
+        item.marketplace_rest = marketplace_stock(p.total_rest, buffer)
+        items.append(item)
+
     return ProductPage(
-        items=[ProductOut.model_validate(p) for p in rows],
+        items=items,
         total=total or 0,
         page=page,
         page_size=page_size,
         in_stock_count=in_stock_count or 0,
         total_rest=total_rest or 0,
+        stock_buffer=buffer,
     )
 
 

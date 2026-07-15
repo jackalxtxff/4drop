@@ -105,6 +105,10 @@ class Credential(Base):
     warehouses: Mapped[list] = mapped_column(JSONB, default=list)
     selected_warehouses: Mapped[list] = mapped_column(JSONB, default=list)
 
+    # Прочие настройки площадки: для WB — id склада FBS продавца (создаётся при
+    # первом пуше остатков), контур sandbox/prod и т.п.
+    settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
@@ -297,6 +301,76 @@ class Order(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class MissingStrategy(StrEnum):
+    """Что делать с товаром, который пропал из выдачи 4tochki.
+
+    Поиск 4tochki отдаёт только позиции с остатком, поэтому «пропал» почти всегда
+    значит «кончился», а не «снят с продажи». Отсюда безопасный дефолт — обнулить
+    остаток, сохранив карточку: товар вернётся на склад, и остаток восстановится
+    сам, без перезаливки карточки на маркетплейсе.
+    """
+
+    ZERO_STOCK = "zero_stock"
+    DELETE = "delete"
+
+
+class SyncSettings(Base):
+    """Расписание фоновых обновлений. Один набор на поставщика.
+
+    Интервал 0 = задача выключена.
+    """
+
+    __tablename__ = "sync_settings"
+    __table_args__ = (UniqueConstraint("supplier_id", name="uq_sync_settings_supplier"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    supplier_id: Mapped[int] = mapped_column(
+        ForeignKey("suppliers.id", ondelete="CASCADE"), index=True
+    )
+
+    # Полная выгрузка каталога: тянет карточки и атрибуты. Дорогая, десятки минут.
+    catalog_interval_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+
+    # Цены и остатки по уже известным CAE. Дёшево, это и есть защита от оверселла.
+    stocks_interval_minutes: Mapped[int] = mapped_column(Integer, default=15)
+
+    # Отправка цен и остатков на WB и Ozon.
+    push_interval_minutes: Mapped[int] = mapped_column(Integer, default=30)
+
+    missing_strategy: Mapped[str] = mapped_column(
+        String(32), default=MissingStrategy.ZERO_STOCK
+    )
+
+    # Буфер остатка: сколько штук вычитать из реального остатка перед отправкой на
+    # маркетплейс. Реальный остаток 4tochki в products.total_rest НЕ меняем — буфер
+    # применяется только к количеству, публикуемому на площадке (see stock.py).
+    # Пример: буфер 2, реальный 8 → на МП 6; реальный ≤2 → на МП 0.
+    stock_buffer: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Формулы ценообразования — отдельно по площадкам, у WB и Ozon разные комиссии.
+    # Переменные: purchase (закупочная), rrp (розница 4tochki), weight. См. formula.py.
+    wb_price_formula: Mapped[str] = mapped_column(
+        String(500), default="round_to(purchase * 1.25, 10)"
+    )
+    ozon_price_formula: Mapped[str] = mapped_column(
+        String(500), default="round_to(purchase * 1.3, 10)"
+    )
+
+    # Цена «до скидки» (зачёркнутая). Считается после основной цены, поэтому в её
+    # формуле доступна переменная нашей цены (price / wb_price / ozon_price).
+    # WB: из цены до скидки и нашей цены выводится процент скидки. Ozon: обе цены числом.
+    wb_price_before_formula: Mapped[str] = mapped_column(
+        String(500), default="round_to(wb_price * 1.4, 100)"
+    )
+    ozon_price_before_formula: Mapped[str] = mapped_column(
+        String(500), default="round_to(ozon_price * 1.4, 100)"
+    )
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

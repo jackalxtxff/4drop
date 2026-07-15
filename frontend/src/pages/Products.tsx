@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import {
   api,
+  type Credential,
   type Facets,
   type Product,
   type ProductPage,
@@ -12,25 +13,41 @@ import {
 import { useSupplier } from "../components/Layout";
 import { MultiSelect } from "../components/MultiSelect";
 import { StockTooltip } from "../components/StockTooltip";
+import { IntegrateDialog } from "../components/IntegrateDialog";
 
 const PAGE_SIZE = 200;
 const ROW_HEIGHT = 56;
 
-const INTEGRATION_LABEL: Record<Product["integration_status"], string> = {
-  none: "Не интегрирован",
-  pending: "На модерации",
-  active: "Активен",
-  rejected: "Отклонён",
-  error: "Ошибка",
+// Бейдж площадки: WB фиолетовый, Ozon голубой. Приглушаем, если карточка ещё не
+// активна (на модерации / ошибка), чтобы «активен» читался с одного взгляда.
+const PLATFORM_BADGE: Record<string, { label: string; active: string; muted: string }> = {
+  wb: {
+    label: "WB",
+    active: "bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300",
+    muted:
+      "bg-violet-50 text-violet-400 ring-1 ring-inset ring-violet-200 dark:bg-violet-950/40 dark:text-violet-500 dark:ring-violet-900",
+  },
+  ozon: {
+    label: "Ozon",
+    active: "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300",
+    muted:
+      "bg-sky-50 text-sky-400 ring-1 ring-inset ring-sky-200 dark:bg-sky-950/40 dark:text-sky-500 dark:ring-sky-900",
+  },
 };
 
-const INTEGRATION_STYLE: Record<Product["integration_status"], string> = {
-  none: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
-  pending: "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
-  active: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
-  rejected: "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300",
-  error: "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300",
+const LINK_STATUS_LABEL: Record<string, string> = {
+  active: "активна",
+  pending: "на модерации",
+  rejected: "отклонена",
+  error: "ошибка",
+  none: "нет",
 };
+
+const INTEGRATION_FILTER_OPTIONS = [
+  { value: "wb", label: "На Wildberries" },
+  { value: "ozon", label: "На Ozon" },
+  { value: "none", label: "Не интегрирован" },
+];
 
 /** Сезон и тип 4tochki отдают кодами. Значения сверены с фактическим каталогом. */
 const SEASON_LABEL: Record<string, string> = { s: "Лето", w: "Зима", u: "Всесезонная" };
@@ -70,6 +87,7 @@ interface Filters {
   width: string[];
   height: string[];
   diameter: string[];
+  integration: string[];
   inStock: boolean;
   priceMin: string;
   priceMax: string;
@@ -85,6 +103,7 @@ const EMPTY: Filters = {
   width: [],
   height: [],
   diameter: [],
+  integration: [],
   inStock: false,
   priceMin: "",
   priceMax: "",
@@ -122,7 +141,7 @@ function buildQuery(f: Filters, sort: SortField, order: Order, page: number): st
   const p = new URLSearchParams();
   if (f.q) p.set("q", f.q);
   (
-    ["brand", "season", "tyre_type", "constr", "camera", "width", "height", "diameter"] as const
+    ["brand", "season", "tyre_type", "constr", "camera", "width", "height", "diameter", "integration"] as const
   ).forEach((key) => f[key].forEach((v) => p.append(key, v)));
   if (f.inStock) p.set("in_stock", "true");
   if (f.priceMin) p.set("price_min", f.priceMin);
@@ -147,7 +166,7 @@ export function ProductsPage() {
 
   const [items, setItems] = useState<Product[]>([]);
   const [total, setTotal] = useState(0);
-  const [summary, setSummary] = useState({ inStock: 0, rest: 0 });
+  const [summary, setSummary] = useState({ inStock: 0, rest: 0, buffer: 0 });
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
 
@@ -155,9 +174,15 @@ export function ProductsPage() {
   const [job, setJob] = useState<SyncJob | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [confirm, setConfirm] = useState<string[] | null>(null);
+  const [integrating, setIntegrating] = useState(false);
+  const [creds, setCreds] = useState<Credential[]>([]);
+
   const [zoom, setZoom] = useState<{ src: string; top: number; left: number } | null>(null);
   const [stockHover, setStockHover] = useState<{
     productId: number;
+    totalRest: number;
+    marketplaceRest: number;
     top: number;
     left: number;
   } | null>(null);
@@ -179,7 +204,11 @@ export function ProductsPage() {
           `/suppliers/${supplierId}/products?${buildQuery(filters, sort, order, pageNo)}`,
         );
         setTotal(data.total);
-        setSummary({ inStock: data.in_stock_count, rest: data.total_rest });
+        setSummary({
+          inStock: data.in_stock_count,
+          rest: data.total_rest,
+          buffer: data.stock_buffer,
+        });
         setItems((prev) => (append ? [...prev, ...data.items] : data.items));
         setPage(pageNo);
       } catch (err) {
@@ -200,6 +229,7 @@ export function ProductsPage() {
   useEffect(() => {
     if (!supplierId) return;
     void api.get<Facets>(`/suppliers/${supplierId}/products/facets`).then(setFacets);
+    void api.get<Credential[]>(`/suppliers/${supplierId}/connections`).then(setCreds);
   }, [supplierId, current?.catalog_synced_at]);
 
   const virtualizer = useVirtualizer({
@@ -253,6 +283,7 @@ export function ProductsPage() {
 
   const integrate = async (platforms: string[]) => {
     if (!supplierId || selected.size === 0) return;
+    setIntegrating(true);
     setError(null);
     try {
       setJob(
@@ -261,8 +292,11 @@ export function ProductsPage() {
           platforms,
         }),
       );
+      setConfirm(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось запустить интеграцию");
+    } finally {
+      setIntegrating(false);
     }
   };
 
@@ -293,7 +327,7 @@ export function ProductsPage() {
   );
 
   const activeFilters =
-    (["brand", "season", "tyre_type", "constr", "camera", "width", "height", "diameter"] as const)
+    (["brand", "season", "tyre_type", "constr", "camera", "width", "height", "diameter", "integration"] as const)
       .reduce((n, k) => n + filters[k].length, 0) +
     (filters.inStock ? 1 : 0) +
     (filters.priceMin ? 1 : 0) +
@@ -435,6 +469,18 @@ export function ProductsPage() {
           placeholder="Любая"
           className="w-36"
         />
+        <MultiSelect
+          label="Интеграция"
+          options={INTEGRATION_FILTER_OPTIONS.map((o) => o.value)}
+          selected={filters.integration}
+          onChange={(v) => setFilters({ ...filters, integration: v })}
+          renderOption={(v) =>
+            INTEGRATION_FILTER_OPTIONS.find((o) => o.value === v)?.label ?? v
+          }
+          searchable={false}
+          placeholder="Любая"
+          className="w-44"
+        />
 
         <div>
           <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -500,6 +546,12 @@ export function ProductsPage() {
           <span className="font-medium text-slate-900 dark:text-slate-100">
             {summary.rest.toLocaleString("ru")} шт.
           </span>
+          {summary.buffer > 0 && (
+            <span className="text-slate-400 dark:text-slate-500">
+              {" "}
+              (буфер {summary.buffer} шт. на позицию)
+            </span>
+          )}
           {selected.size > 0 && (
             <>
               {" · "}выбрано:{" "}
@@ -514,19 +566,19 @@ export function ProductsPage() {
           <div className="flex items-center gap-2">
             <span className="text-sm text-slate-500 dark:text-slate-400">Интегрировать в:</span>
             <button
-              onClick={() => void integrate(["wb"])}
+              onClick={() => setConfirm(["wb"])}
               className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
             >
               Wildberries
             </button>
             <button
-              onClick={() => void integrate(["ozon"])}
+              onClick={() => setConfirm(["ozon"])}
               className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
             >
               Ozon
             </button>
             <button
-              onClick={() => void integrate(["wb", "ozon"])}
+              onClick={() => setConfirm(["wb", "ozon"])}
               className="rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white dark:bg-slate-100 dark:text-slate-900"
             >
               Обе площадки
@@ -650,7 +702,13 @@ export function ProductsPage() {
                       <span
                         onMouseEnter={(e) => {
                           const r = e.currentTarget.getBoundingClientRect();
-                          setStockHover({ productId: p.id, top: r.bottom + 6, left: r.left - 200 });
+                          setStockHover({
+                            productId: p.id,
+                            totalRest: p.total_rest,
+                            marketplaceRest: p.marketplace_rest,
+                            top: r.bottom + 6,
+                            left: r.left - 200,
+                          });
                         }}
                         onMouseLeave={() => setStockHover(null)}
                         className={`cursor-help text-right tabular-nums ${
@@ -666,12 +724,37 @@ export function ProductsPage() {
                         {p.min_price ? Number(p.min_price).toLocaleString("ru") : "—"}
                       </span>
 
-                      <span>
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-xs ${INTEGRATION_STYLE[p.integration_status]}`}
-                        >
-                          {INTEGRATION_LABEL[p.integration_status]}
-                        </span>
+                      <span className="flex flex-wrap gap-1">
+                        {p.integrations.length === 0 ? (
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                            Не интегрирован
+                          </span>
+                        ) : (
+                          p.integrations.map((link) => {
+                            const badge = PLATFORM_BADGE[link.platform];
+                            if (!badge) return null;
+                            const active = link.status === "active";
+                            return (
+                              <span
+                                key={link.platform}
+                                title={
+                                  `${badge.label}: ${LINK_STATUS_LABEL[link.status] ?? link.status}` +
+                                  (link.status_message ? ` — ${link.status_message}` : "")
+                                }
+                                className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                                  active ? badge.active : badge.muted
+                                }`}
+                              >
+                                {badge.label}
+                                {!active && (
+                                  <span className="ml-1 opacity-70">
+                                    {link.status === "pending" ? "⏳" : "!"}
+                                  </span>
+                                )}
+                              </span>
+                            );
+                          })
+                        )}
                       </span>
                     </div>
                   );
@@ -700,10 +783,24 @@ export function ProductsPage() {
         </div>
       )}
 
+      {confirm && (
+        <IntegrateDialog
+          products={items.filter((p) => selected.has(p.id))}
+          platforms={confirm}
+          wbCred={creds.find((c) => c.platform === "wb")}
+          busy={integrating}
+          onConfirm={() => void integrate(confirm)}
+          onClose={() => setConfirm(null)}
+        />
+      )}
+
       {stockHover && supplierId && (
         <StockTooltip
           supplierId={supplierId}
           productId={stockHover.productId}
+          totalRest={stockHover.totalRest}
+          marketplaceRest={stockHover.marketplaceRest}
+          buffer={summary.buffer}
           top={stockHover.top}
           left={stockHover.left}
         />

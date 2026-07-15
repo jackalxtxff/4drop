@@ -104,6 +104,63 @@ function Field({
   );
 }
 
+/** Какие права нужно выдать токену. Список — часть настройки, а не справка:
+ *  без этих галочек интеграция не заработает, а площадка вернёт 403. */
+function Scopes({
+  title,
+  required,
+  optional,
+  note,
+}: {
+  title: string;
+  required: [string, string][];
+  optional?: [string, string][];
+  note?: string;
+}) {
+  return (
+    <div className="rounded-lg bg-slate-50 p-3 dark:bg-slate-800/60">
+      <p className="text-xs font-medium text-slate-700 dark:text-slate-300">{title}</p>
+
+      <ul className="mt-2 space-y-1">
+        {required.map(([name, why]) => (
+          <li key={name} className="flex gap-2 text-xs">
+            <span className="mt-px text-emerald-600 dark:text-emerald-400">✓</span>
+            <span className="min-w-0">
+              <span className="font-medium text-slate-800 dark:text-slate-200">{name}</span>
+              <span className="text-slate-500 dark:text-slate-400"> — {why}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      {optional && optional.length > 0 && (
+        <>
+          <p className="mt-2.5 text-xs font-medium text-slate-500 dark:text-slate-400">
+            Желательно:
+          </p>
+          <ul className="mt-1 space-y-1">
+            {optional.map(([name, why]) => (
+              <li key={name} className="flex gap-2 text-xs">
+                <span className="mt-px text-slate-400">+</span>
+                <span className="min-w-0">
+                  <span className="font-medium text-slate-700 dark:text-slate-300">{name}</span>
+                  <span className="text-slate-500 dark:text-slate-400"> — {why}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {note && (
+        <p className="mt-2.5 border-t border-slate-200 pt-2 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+          {note}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ConnectionsPage() {
   const { current } = useSupplier();
   const supplierId = current?.id;
@@ -113,7 +170,7 @@ export function ConnectionsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [ft, setFt] = useState({ login: "", password: "" });
-  const [wb, setWb] = useState({ content: "", prices: "", marketplace: "" });
+  const [wb, setWb] = useState({ api_key: "" });
   const [ozon, setOzon] = useState({ client_id: "", api_key: "" });
 
   const load = async () => {
@@ -202,39 +259,35 @@ export function ConnectionsPage() {
 
         <Card
           title="Wildberries"
-          subtitle="API-ключи по разделам Seller API"
+          subtitle="Один токен Seller API — категории отмечаются при его создании"
           cred={byPlatform("wb")}
           checking={checking === "wb"}
           onCheck={() =>
             run("wb", async () => {
-              if (wb.content || wb.prices || wb.marketplace) {
+              if (wb.api_key) {
                 await api.put(`/suppliers/${supplierId}/connections/wb`, wb);
-                setWb({ content: "", prices: "", marketplace: "" });
+                setWb({ api_key: "" });
               }
               await api.post(`/suppliers/${supplierId}/connections/wb/check`);
             })
           }
         >
           <Field
-            label="Content (карточки)"
+            label="API-ключ"
             type="password"
-            value={wb.content}
-            onChange={(v) => setWb({ ...wb, content: v })}
-            placeholder={byPlatform("wb")?.secrets_masked.content ?? "ключ Content API"}
+            value={wb.api_key}
+            onChange={(v) => setWb({ api_key: v })}
+            placeholder={byPlatform("wb")?.secrets_masked.api_key ?? "токен Seller API"}
           />
-          <Field
-            label="Prices & Discounts (цены)"
-            type="password"
-            value={wb.prices}
-            onChange={(v) => setWb({ ...wb, prices: v })}
-            placeholder={byPlatform("wb")?.secrets_masked.prices ?? "ключ Prices API"}
-          />
-          <Field
-            label="Marketplace (остатки, заказы)"
-            type="password"
-            value={wb.marketplace}
-            onChange={(v) => setWb({ ...wb, marketplace: v })}
-            placeholder={byPlatform("wb")?.secrets_masked.marketplace ?? "ключ Marketplace API"}
+
+          <Scopes
+            title="При создании токена в кабинете WB отметьте категории:"
+            required={[
+              ["Контент", "создание и редактирование карточек товара"],
+              ["Цены и скидки", "установка цен с наценкой"],
+              ["Маркетплейс", "остатки FBS и сборочные задания (заказы)"],
+            ]}
+            note="Уровень доступа — «Чтение и запись». Остальные категории (Статистика, Финансы, Аналитика, Продвижение, Вопросы и отзывы, Чат, Поставки, Возвраты, Документы, Пользователи) не нужны — не включайте их, чтобы не расширять права токена."
           />
         </Card>
 
@@ -265,6 +318,22 @@ export function ConnectionsPage() {
             value={ozon.api_key}
             onChange={(v) => setOzon({ ...ozon, api_key: v })}
             placeholder={byPlatform("ozon")?.secrets_masked.api_key ?? "Api-Key"}
+          />
+
+          <Scopes
+            title="При создании Api-Key отметьте типы токена:"
+            required={[
+              ["Product", "создание и обновление товаров, цены, остатки"],
+              ["Description Category", "дерево категорий и характеристики — без них карточку не собрать"],
+              ["Warehouse", "склады: остатки FBS привязаны к складу"],
+              ["Posting FBS", "заказы FBS: получение и отгрузка"],
+            ]}
+            optional={[
+              ["Notification", "push о новых заказах вместо опроса"],
+              ["Certification", "шины подлежат обязательной сертификации"],
+              ["Brand", "проверка, что бренд разрешён к продаже"],
+            ]}
+            note="Не выбирайте роль Admin: она даёт доступ ко всем 460 методам Seller API, и утечка такого токена равносильна утечке всего кабинета."
           />
         </Card>
       </div>

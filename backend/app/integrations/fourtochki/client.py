@@ -303,6 +303,45 @@ class FourTochkiClient:
                 )
         return items
 
+    # --- пакетные обёртки ------------------------------------------------
+
+    async def _chunked(self, codes: list[str], batch: int, fetch: Any) -> list[Any]:
+        """Разбить коды на батчи и опросить их параллельно.
+
+        Ограничения найдены замером, в WSDL их нет:
+          * лимит списка у методов РАЗНЫЙ (см. config), сверх него — ошибка [51];
+          * выше ~6 одновременных запросов их сервер не ускоряется.
+        """
+        chunks = [codes[i : i + batch] for i in range(0, len(codes), batch)]
+        sem = asyncio.Semaphore(get_settings().fourtochki_concurrency)
+
+        async def one(chunk: list[str]) -> Any:
+            async with sem:
+                return await fetch(chunk)
+
+        results = await asyncio.gather(*(one(c) for c in chunks))
+        return [item for r in results for item in r]
+
+    async def get_price_rest_all(self, codes: list[str]) -> list[PriceRest]:
+        """Цены и остатки по всему списку CAE. Лимит метода — 2000 кодов за запрос."""
+        if not codes:
+            return []
+        return await self._chunked(
+            codes,
+            get_settings().fourtochki_price_batch_size,
+            lambda c: self.get_price_rest(c),
+        )
+
+    async def get_goods_info_all(self, codes: list[str]) -> list[GoodsItem]:
+        """Атрибуты по всему списку CAE. Лимит метода — 200 кодов, в 10 раз строже цен."""
+        if not codes:
+            return []
+        return await self._chunked(
+            codes,
+            get_settings().fourtochki_goods_batch_size,
+            self.get_goods_info,
+        )
+
     async def find_tyres(
         self, page: int = 1, page_size: int = 500, **criteria: Any
     ) -> tuple[list[CatalogEntry], int]:

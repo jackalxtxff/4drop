@@ -108,7 +108,7 @@ async def set_wb(
     payload: WBCredentialIn, supplier: SupplierDep, session: SessionDep
 ) -> Credential:
     cred = await _get_or_create(session, supplier.id, Platform.WB)
-    _store_secrets(cred, payload.model_dump(exclude_none=True))
+    _store_secrets(cred, {"api_key": payload.api_key})
     cred.status = ConnectionStatus.NOT_CONFIGURED
     cred.status_message = "Ключи сохранены, подключение не проверено"
     await session.commit()
@@ -178,11 +178,10 @@ async def check_wb(supplier: SupplierDep, session: SessionDep) -> Credential:
     cred = await _require(session, supplier.id, Platform.WB)
     secrets = load_secrets(cred)
 
-    results = await WBClient(secrets).check()
-    failed = [scope for scope, res in results.items() if res not in ("ок", "не задан")]
+    ok, message = await WBClient(secrets["api_key"]).check()
 
-    cred.status = ConnectionStatus.ERROR if failed else ConnectionStatus.OK
-    cred.status_message = "; ".join(f"{scope}: {res}" for scope, res in results.items())
+    cred.status = ConnectionStatus.OK if ok else ConnectionStatus.ERROR
+    cred.status_message = message
     cred.checked_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(cred)

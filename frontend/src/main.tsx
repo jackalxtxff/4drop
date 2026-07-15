@@ -11,6 +11,7 @@ initTheme();
 import { ConnectionsPage } from "./pages/Connections";
 import { LoginPage } from "./pages/Login";
 import { ProductsPage } from "./pages/Products";
+import { SyncPage } from "./pages/Sync";
 
 function Protected({ children }: { children: React.ReactNode }) {
   if (!auth.token) return <Navigate to="/login" replace />;
@@ -31,6 +32,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         >
           <Route path="/products" element={<ProductsPage />} />
           <Route path="/connections" element={<ConnectionsPage />} />
+          <Route path="/sync" element={<SyncPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/products" replace />} />
       </Routes>

@@ -19,9 +19,15 @@ class Settings(BaseSettings):
     fourtochki_wsdl: str = "http://api-b2b.4tochki.ru/WCF/ClientService.svc?wsdl"
     fourtochki_wsdl_cache: str = "/cache/4tochki-wsdl.db"
 
-    # 4tochki отдаёт цены и остатки пачками по кодам; батч подобран консервативно,
-    # официальных лимитов в WSDL нет — уточняется у поставщика.
-    fourtochki_batch_size: int = 200
+    # Лимиты 4tochki на размер списка. В WSDL их нет — найдены замером, обе границы
+    # жёсткие: сверх них API отвечает «[51] Превышен лимит элементов».
+    # У методов лимиты РАЗНЫЕ, общий батч ставить нельзя.
+    fourtochki_price_batch_size: int = 2000  # GetGoodsPriceRestByCode
+    fourtochki_goods_batch_size: int = 200   # GetGoodsInfo
+
+    # Параллельные SOAP-запросы. Замер: 1 поток ~760 кодов/с, 4 ~1730, 8 ~1770 —
+    # выше 6 прирост упирается в их сервер, а нагрузку мы наращиваем зря.
+    fourtochki_concurrency: int = 6
 
     bootstrap_user_email: str | None = None
     bootstrap_user_password: str | None = None

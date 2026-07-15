@@ -86,6 +86,9 @@ export function Layout() {
             <NavLink to="/connections" className={linkClass}>
               Подключения
             </NavLink>
+            <NavLink to="/sync" className={linkClass}>
+              Синхронизация
+            </NavLink>
           </nav>
 
           <div className="ml-auto flex items-center gap-3">

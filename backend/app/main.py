@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 
-from app.api import auth, connections, products, suppliers
+from app.api import auth, connections, products, suppliers, sync
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import User
@@ -55,6 +55,7 @@ app.include_router(auth.router)
 app.include_router(suppliers.router)
 app.include_router(connections.router)
 app.include_router(products.router)
+app.include_router(sync.router)
 
 
 @app.get("/health")

@@ -322,14 +322,21 @@ class FourTochkiClient:
         results = await asyncio.gather(*(one(c) for c in chunks))
         return [item for r in results for item in r]
 
-    async def get_price_rest_all(self, codes: list[str]) -> list[PriceRest]:
-        """Цены и остатки по всему списку CAE. Лимит метода — 2000 кодов за запрос."""
+    async def get_price_rest_all(
+        self, codes: list[str], warehouse_ids: list[int] | None = None
+    ) -> list[PriceRest]:
+        """Цены и остатки по всему списку CAE. Лимит метода — 2000 кодов за запрос.
+
+        warehouse_ids сужает ответ до нужных складов: сам API возвращает whpr по
+        всем складам, а фильтр отдаёт только выбранные — заметно меньше данных для
+        парсинга и записи в БД, если работаем с несколькими складами из многих.
+        """
         if not codes:
             return []
         return await self._chunked(
             codes,
             get_settings().fourtochki_price_batch_size,
-            lambda c: self.get_price_rest(c),
+            lambda c: self.get_price_rest(c, warehouse_ids=warehouse_ids),
         )
 
     async def get_goods_info_all(self, codes: list[str]) -> list[GoodsItem]:

@@ -160,23 +160,35 @@ export function SyncPage() {
     [jobKind, jobStatus, jobLimit],
   );
 
+  // Актуальная длина списка для offset автоподгрузки — через ref, чтобы loadJobs
+  // не пересоздавался на каждую догрузку (иначе IntersectionObserver перезапускается).
+  const jobsCountRef = useRef(0);
+  useEffect(() => {
+    jobsCountRef.current = jobs.length;
+  }, [jobs]);
+
   const loadJobs = useCallback(
     async (append: boolean) => {
       if (!supplierId) return;
       setJobsLoading(true);
       try {
-        const offset = append ? jobs.length : 0;
+        const offset = append ? jobsCountRef.current : 0;
         const page = await api.get<import("../api").SyncJobPage>(
           `/suppliers/${supplierId}/sync/jobs?${jobsQuery(offset)}`,
         );
         setJobsTotal(page.total);
-        setJobs((prev) => (append ? [...prev, ...page.items] : page.items));
+        setJobs((prev) => {
+          if (!append) return page.items;
+          // Дедуп по id: список живой (планировщик добавляет задачи сверху),
+          // offset сдвигается, и одна и та же задача может прийти дважды — иначе
+          // React ругается на дубли ключей.
+          const seen = new Set(prev.map((j) => j.id));
+          return [...prev, ...page.items.filter((j) => !seen.has(j.id))];
+        });
       } finally {
         setJobsLoading(false);
       }
     },
-    // jobs.length сознательно не в зависимостях: append читает его на момент вызова.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [supplierId, jobsQuery],
   );
 
@@ -738,12 +750,7 @@ export function SyncPage() {
                           {dur != null ? `${dur} с` : "—"}
                         </td>
                         <td className="py-2 pr-4 tabular-nums text-slate-500 dark:text-slate-400">
-                          {/* Прогресс осмыслен только пока задача идёт; у завершённой
-                              есть итоговое сообщение. */}
-                          {(j.status === "running" || j.status === "queued") &&
-                          j.total > 0
-                            ? `${j.processed} / ${j.total}`
-                            : "—"}
+                          {j.total > 0 ? `${j.processed} / ${j.total}` : "—"}
                         </td>
                         <td className="py-2 text-slate-500 dark:text-slate-400">
                           {j.message ?? "—"}

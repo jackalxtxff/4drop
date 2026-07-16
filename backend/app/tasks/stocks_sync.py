@@ -64,17 +64,31 @@ async def _upsert_stocks(session: AsyncSession, rows: list[dict]) -> None:
         )
 
 
-async def _zero_stale(session: AsyncSession, supplier_id: int, started: datetime) -> int:
+async def _zero_stale(
+    session: AsyncSession,
+    supplier_id: int,
+    started: datetime,
+    warehouses: list[int] | None,
+) -> int:
     """Обнулить строки, которых поставщик в этот раз не подтвердил.
 
     Признак — updated_at раньше начала задачи: всё, что пришло из API, мы только что
-    перезаписали. Считается одним UPDATE в БД, а не выгрузкой 32 000 строк в Python.
+    перезаписали. Считается одним UPDATE в БД, а не выгрузкой строк в Python.
+
+    warehouses ограничивает обнуление выбранными складами: прогон запрашивал только
+    их, а строки НЕвыбранных складов трогать нельзя — они обновляются каталогом, и
+    их «неподтверждённость» здесь ничего не значит.
 
     Строки не удаляем: товар вернётся на склад, и строка обновится на месте.
     """
+    wrh_filter = "AND s.wrh = ANY(:warehouses)" if warehouses else ""
+    params = {"supplier_id": supplier_id, "started": started}
+    if warehouses:
+        params["warehouses"] = warehouses
+
     result = await session.execute(
         text(
-            """
+            f"""
             UPDATE product_stocks s
             SET rest = 0, updated_at = now()
             FROM products p
@@ -82,9 +96,10 @@ async def _zero_stale(session: AsyncSession, supplier_id: int, started: datetime
               AND p.supplier_id = :supplier_id
               AND s.rest > 0
               AND s.updated_at < :started
+              {wrh_filter}
             """
         ),
-        {"supplier_id": supplier_id, "started": started},
+        params,
     )
     return result.rowcount or 0
 
@@ -138,10 +153,12 @@ async def sync_stocks(ctx: dict, supplier_id: int, job_id: int) -> None:
         try:
             client = FourTochkiClient(secrets["login"], secrets["password"])
 
-            # Спрашиваем ВСЕ склады, а не только выбранные: выбор применяется позже,
-            # при расчёте агрегатов. Иначе данные по невыбранным складам затрутся,
-            # и смена набора складов перестанет быть мгновенной.
-            rows = await client.get_price_rest_all(list(id_by_cae))
+            # Частый прогон работает ТОЛЬКО по выбранным складам — это в разы дешевле
+            # и быстрее (меньше данных из API и записи в БД). Полную картину по всем
+            # складам (для подсказки «где ещё есть сток») обновляет суточный каталог,
+            # который тоже тянет остатки по всем складам.
+            selected = cred.selected_warehouses or None
+            rows = await client.get_price_rest_all(list(id_by_cae), warehouse_ids=selected)
 
             stock_rows = [
                 {
@@ -157,39 +174,68 @@ async def sync_stocks(ctx: dict, supplier_id: int, job_id: int) -> None:
             ]
 
             await _upsert_stocks(session, stock_rows)
-            job.processed = len(rows)
+            # Проверили ВСЕ коды (запрос по всему списку); rows — лишь те, у кого
+            # API вернул остаток на нужных складах.
+            job.processed = len(id_by_cae)
             await session.commit()
 
-            zeroed = await _zero_stale(session, supplier_id, started)
+            zeroed = await _zero_stale(session, supplier_id, started, cred.selected_warehouses)
 
-            # Товары, которых проценка не вернула ВООБЩЕ — 4tochki их больше не знает
-            # (сняты с ассортимента). Это авторитетный признак «пропал», в отличие от
-            # отсутствия в выдаче поиска. При стратегии delete — удаляем; при
-            # zero_stock их остатки уже обнулены выше (_zero_stale).
-            gone = [cae for cae in id_by_cae if cae not in {r.cae for r in rows}]
+            # Удаление снятых с ассортимента (стратегия delete) возможно только когда
+            # запрашивали ВСЕ склады: «не вернулся проценкой» = снят лишь если проверили
+            # весь ассортимент. При фильтрации по выбранным складам товар может лежать
+            # на невыбранных — тут снятие не определить, оно остаётся за каталогом.
             removed = 0
-            if gone and settings and settings.missing_strategy == MissingStrategy.DELETE:
-                res = await session.execute(
-                    delete(Product).where(
-                        Product.supplier_id == supplier_id, Product.cae.in_(gone)
+            if not selected and settings and settings.missing_strategy == MissingStrategy.DELETE:
+                gone = [cae for cae in id_by_cae if cae not in {r.cae for r in rows}]
+                if gone:
+                    res = await session.execute(
+                        delete(Product).where(
+                            Product.supplier_id == supplier_id, Product.cae.in_(gone)
+                        )
                     )
-                )
-                removed = res.rowcount or 0
+                    removed = res.rowcount or 0
+
+            # Снимок агрегатов ДО пересчёта — чтобы показать, как изменились остаток
+            # и цены после этого прогона. Дёшево: пара int-колонок на товар.
+            before = {
+                pid: (tr, mp)
+                for pid, tr, mp in (
+                    await session.execute(
+                        select(Product.id, Product.total_rest, Product.min_price).where(
+                            Product.supplier_id == supplier_id
+                        )
+                    )
+                ).all()
+            }
+            before_sum = sum(v[0] for v in before.values())
 
             await recompute_aggregates(session, supplier_id, cred.selected_warehouses)
 
-            elapsed = (datetime.now(UTC) - started).total_seconds()
+            after = (
+                await session.execute(
+                    select(Product.id, Product.total_rest, Product.min_price).where(
+                        Product.supplier_id == supplier_id
+                    )
+                )
+            ).all()
+            after_sum = sum(tr for _, tr, _ in after)
+            price_changes = sum(
+                1 for pid, _, mp in after if pid in before and before[pid][1] != mp
+            )
+
             job.status = "done"
             job.finished_at = datetime.now(UTC)
-            job.message = (
-                f"Обновлено позиций: {len(rows)} за {elapsed:.0f} с. "
-                f"Обнулено остатков: {zeroed}."
-            )
-            if gone:
-                job.message += (
-                    f" Снято 4tochki: {len(gone)}"
-                    + (f" (удалено {removed})" if removed else " (остаток обнулён)")
-                )
+            parts = [
+                f"Проверено позиций: {len(id_by_cae)}",
+                f"С остатком: {len(rows)}",
+                f"Обнулено остатков: {zeroed}",
+                f"Остаток до {before_sum}, после {after_sum}",
+                f"Обновлено цен: {price_changes}",
+            ]
+            if removed:
+                parts.append(f"Удалено снятых: {removed}")
+            job.message = ". ".join(parts) + "."
             session.add(
                 LogEntry(
                     supplier_id=supplier_id,

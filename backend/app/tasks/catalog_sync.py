@@ -405,6 +405,18 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
             # число товаров заранее неизвестно, а страницы даёт totalPages поиска.
             pages_done = 0
 
+            # CAE, которые уже были в базе до этого прогона — чтобы отличить новые
+            # товары (появились в каталоге 4tochki) от повторно проверенных.
+            existing_caes = set(
+                (
+                    await session.execute(
+                        select(Product.cae).where(Product.supplier_id == supplier_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
             for finder, label in (
                 (client.find_tyres, "шины"),
                 (client.find_rims, "диски"),
@@ -445,15 +457,51 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
             # изменения каталога в реальном времени приводят к тому, что часть
             # реально имеющихся товаров в неё не попадает. Обнуление/удаление —
             # работа sync_stocks: проценка GetGoodsPriceRestByCode по коду точна.
+            # Снимок агрегатов ДО пересчёта — чтобы показать движение остатка и цен
+            # после этого прогона (та же сводка, что у задачи «Цены и остатки»).
+            before = {
+                pid: (tr, mp)
+                for pid, tr, mp in (
+                    await session.execute(
+                        select(Product.id, Product.total_rest, Product.min_price).where(
+                            Product.supplier_id == supplier_id
+                        )
+                    )
+                ).all()
+            }
+            before_sum = sum(v[0] for v in before.values())
+
             await recompute_aggregates(session, supplier_id, cred.selected_warehouses)
 
-            elapsed = (datetime.now(UTC) - job.started_at).total_seconds()
+            after = (
+                await session.execute(
+                    select(Product.id, Product.total_rest, Product.min_price).where(
+                        Product.supplier_id == supplier_id
+                    )
+                )
+            ).all()
+            after_sum = sum(tr for _, tr, _ in after)
+            zeroed = sum(
+                1 for pid, tr, _ in after if pid in before and before[pid][0] > 0 and tr == 0
+            )
+            price_changes = sum(
+                1 for pid, _, mp in after if pid in before and before[pid][1] != mp
+            )
+
+            new_count = len(set(id_by_cae) - existing_caes)
             supplier.catalog_synced_at = datetime.now(UTC)
             job.status = "done"
             job.finished_at = datetime.now(UTC)
-            job.message = f"Каталог обновлён: {len(id_by_cae)} позиций за {elapsed:.0f} с"
+            parts = [
+                f"Каталог проверен: {len(id_by_cae)} позиций",
+                f"Новых {new_count}",
+                f"Обнулено остатков: {zeroed}",
+                f"Остаток до {before_sum}, после {after_sum}",
+                f"Обновлено цен: {price_changes}",
+            ]
+            job.message = ". ".join(parts) + "."
             if not cred.selected_warehouses:
-                job.message += ". Склады не выбраны — остатки обнулены."
+                job.message += " Склады не выбраны — остатки обнулены."
             await _log(session, supplier_id, job_id, "info", job.message)
             await session.commit()
 

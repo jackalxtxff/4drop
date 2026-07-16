@@ -175,11 +175,11 @@ async def push_wb(
     if stock_err:
         parts.append(f"ошибка остатков: {stock_err}")
 
-    # Красным помечаем, только если ничего не удалось И при этом были явные ошибки.
-    # «Все цены уже актуальны, остатки без изменений» — это норма, а не провал.
-    something_done = priced > 0 or stocked > 0 or up_to_date > 0
+    # Любая ошибка отправки (цен или остатков) помечает задачу как проблемную,
+    # даже если часть прошла: иначе провал остатков теряется под статусом «готово».
+    # Норму — «всё уже актуально, менять нечего» — ошибкой не считаем.
     has_error = bool(price_err or stock_err)
-    level = "error" if (not something_done and has_error) else "info"
+    level = "error" if has_error else "info"
     return level, ". ".join(parts)
 
 

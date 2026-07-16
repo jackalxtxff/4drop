@@ -143,6 +143,7 @@ async def check_fourtochki(supplier: SupplierDep, session: SessionDep) -> Creden
         client = FourTochkiClient(secrets["login"], secrets["password"])
         if not await client.ping():
             raise FourTochkiError("Ping вернул False — логин или пароль не приняты")
+        account = await client.get_account_name()
         warehouses = await client.get_warehouses()
     except (FourTochkiError, KeyError) as exc:
         cred.status = ConnectionStatus.ERROR
@@ -166,6 +167,7 @@ async def check_fourtochki(supplier: SupplierDep, session: SessionDep) -> Creden
     # Если пользователь ещё ничего не выбрал, не выбираем за него: молча включить
     # все склады — значит опубликовать остатки складов с долгой логистикой и сорвать SLA.
     cred.status = ConnectionStatus.OK
+    cred.account_name = account
     cred.status_message = f"Подключение работает, складов доступно: {len(warehouses)}"
     cred.checked_at = datetime.now(UTC)
     await session.commit()
@@ -178,10 +180,12 @@ async def check_wb(supplier: SupplierDep, session: SessionDep) -> Credential:
     cred = await _require(session, supplier.id, Platform.WB)
     secrets = load_secrets(cred)
 
-    ok, message = await WBClient(secrets["api_key"]).check()
+    client = WBClient(secrets["api_key"])
+    ok, message = await client.check()
 
     cred.status = ConnectionStatus.OK if ok else ConnectionStatus.ERROR
     cred.status_message = message
+    cred.account_name = await client.seller_name() if ok else None
     cred.checked_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(cred)
@@ -193,10 +197,12 @@ async def check_ozon(supplier: SupplierDep, session: SessionDep) -> Credential:
     cred = await _require(session, supplier.id, Platform.OZON)
     secrets = load_secrets(cred)
 
-    ok, message = await OzonClient(secrets["client_id"], secrets["api_key"]).check()
+    client = OzonClient(secrets["client_id"], secrets["api_key"])
+    ok, message = await client.check()
 
     cred.status = ConnectionStatus.OK if ok else ConnectionStatus.ERROR
     cred.status_message = message
+    cred.account_name = await client.seller_name() if ok else None
     cred.checked_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(cred)

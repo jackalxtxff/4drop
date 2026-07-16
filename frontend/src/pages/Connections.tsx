@@ -52,6 +52,24 @@ function Card({
         <StatusBadge status={cred?.status ?? "not_configured"} />
       </div>
 
+      {cred?.account_name && (
+        <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 dark:bg-emerald-950/50">
+          <svg
+            className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400"
+            viewBox="0 0 20 20"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+          >
+            <circle cx="10" cy="6.5" r="3" />
+            <path d="M4 16c0-3 2.7-5 6-5s6 2 6 5" strokeLinecap="round" />
+          </svg>
+          <span className="truncate font-medium text-emerald-800 dark:text-emerald-300">
+            {cred.account_name}
+          </span>
+        </div>
+      )}
+
       {cred?.status_message && (
         <p
           className={`mt-3 rounded-md px-3 py-2 text-sm ${

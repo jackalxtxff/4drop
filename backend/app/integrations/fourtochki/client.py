@@ -203,6 +203,20 @@ class FourTochkiClient:
         """Ping(login, password) -> bool. Бэкенд кнопки «Проверить подключение»."""
         return bool(await self._call("Ping"))
 
+    async def get_account_name(self) -> str | None:
+        """Наименование аккаунта из GetUserList (напр. «ИП …»).
+
+        Показываем его при проверке подключения, чтобы было видно, к какому именно
+        кабинету 4tochki привязаны доступы. Берём первого активного пользователя.
+        """
+        result = await self._call("GetUserList")
+        users = _list(getattr(result, "userInfoList", None))
+        for u in users:
+            name = getattr(u, "name", None)
+            if name and getattr(u, "active", True):
+                return name
+        return users[0].name if users and getattr(users[0], "name", None) else None
+
     async def get_warehouses(self, address_id: int | None = None) -> list[Warehouse]:
         result = await self._call("GetWarehouses", address_id)
 

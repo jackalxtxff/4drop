@@ -80,6 +80,7 @@ class CredentialOut(BaseModel):
     platform: str
     status: str
     status_message: str | None
+    account_name: str | None = None
     checked_at: datetime | None
     secrets_masked: dict
     warehouses: list[WarehouseOut] = []

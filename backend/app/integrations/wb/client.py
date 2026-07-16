@@ -114,6 +114,28 @@ class WBClient:
 
         return not missing, message
 
+    async def seller_name(self) -> str | None:
+        """Наименование продавца из Common API (/api/v1/seller-info).
+
+        Работает только на боевом контуре: у песочницы этого хоста нет, а тестовый
+        токен к боевому не имеет доступа — тогда просто возвращаем None (имя не покажем).
+        Возвращает торговую марку, иначе название.
+        """
+        if self.sandbox:
+            return None
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            try:
+                resp = await http.get(
+                    "https://common-api.wildberries.ru/api/v1/seller-info",
+                    headers=self._headers,
+                )
+            except httpx.HTTPError:
+                return None
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data.get("tradeMark") or data.get("name")
+
     # --- карточки -------------------------------------------------------
 
     # WB режет запросы глобальным лимитером (429), поэтому карточки грузим

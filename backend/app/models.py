@@ -99,6 +99,8 @@ class Credential(Base):
 
     status: Mapped[str] = mapped_column(String(32), default=ConnectionStatus.NOT_CONFIGURED)
     status_message: Mapped[str | None] = mapped_column(Text, default=None)
+    # Наименование кабинета/продавца с площадки (для видного бейджа в UI).
+    account_name: Mapped[str | None] = mapped_column(String(255), default=None)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     # Только для 4tochki: справочник складов из GetWarehouses и выбранные пользователем id.

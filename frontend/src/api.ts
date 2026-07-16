@@ -90,6 +90,7 @@ export interface Credential {
   platform: "fourtochki" | "wb" | "ozon";
   status: ConnectionStatus;
   status_message: string | null;
+  account_name: string | null;
   checked_at: string | null;
   secrets_masked: Record<string, string>;
   warehouses: Warehouse[];

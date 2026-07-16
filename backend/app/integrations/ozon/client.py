@@ -128,6 +128,32 @@ class OzonClient:
             )
         return ok, message
 
+    async def seller_name(self) -> str | None:
+        """Наименование продавца из POST /v1/seller/info.
+
+        Формат ответа Ozon может отличаться, поэтому имя ищем в нескольких вероятных
+        полях; не нашли или метод ответил ошибкой — возвращаем None (имя не покажем).
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            try:
+                resp = await http.post(
+                    f"{BASE}/v1/seller/info", headers=self._headers, json={}
+                )
+            except httpx.HTTPError:
+                return None
+        if resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        result = data.get("result", data) if isinstance(data, dict) else {}
+        for key in ("name", "company_name", "companyName", "title", "seller_name"):
+            value = result.get(key)
+            if value:
+                return str(value)
+        return None
+
     # --- цены и остатки -------------------------------------------------
 
     async def update_prices(self, items: list[dict]) -> tuple[int, str | None]:

@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -182,6 +182,15 @@ async def _enrich_attrs(
             {
                 "b_id": product_id,
                 "attrs": a,
+                # Тип товара, бренд, сезон и т.п. заполняет ТОЛЬКО GetGoodsInfo:
+                # каталог строится из GetRest (голые коды) + проценки, где этих
+                # полей нет. Раньше они приходили из поиска, теперь — отсюда.
+                "goods_type": item.goods_type,
+                "brand": a.get("brand"),
+                "model": a.get("model"),
+                "season": a.get("season"),
+                "thorn": a.get("thorn"),
+                "img_small": a.get("img_small"),
                 # У дисков RimContainer.type — целое число (0/1/2), а не тип шины,
                 # поэтому заполняем только для шин, иначе фильтр забьётся мусором.
                 "tyre_type": a.get("type") if item.goods_type == "tyre" else None,
@@ -217,6 +226,12 @@ async def _enrich_attrs(
         .where(products.c.id == bindparam("b_id"))
         .values(
             attrs=bindparam("attrs"),
+            goods_type=bindparam("goods_type"),
+            brand=bindparam("brand"),
+            model=bindparam("model"),
+            season=bindparam("season"),
+            thorn=bindparam("thorn"),
+            img_small=bindparam("img_small"),
             tyre_type=bindparam("tyre_type"),
             constr=bindparam("constr"),
             camera=bindparam("camera"),
@@ -400,13 +415,8 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
                 await session.commit()
                 return
 
-            id_by_cae: dict[str, int] = {}
-            # Прогресс каталога считаем в СТРАНИЦАХ (processed и total в одних единицах):
-            # число товаров заранее неизвестно, а страницы даёт totalPages поиска.
-            pages_done = 0
-
             # CAE, которые уже были в базе до этого прогона — чтобы отличить новые
-            # товары (появились в каталоге 4tochki) от повторно проверенных.
+            # товары от повторно проверенных.
             existing_caes = set(
                 (
                     await session.execute(
@@ -417,46 +427,69 @@ async def sync_catalog(ctx: dict, supplier_id: int, job_id: int) -> None:
                 .all()
             )
 
-            for finder, label in (
-                (client.find_tyres, "шины"),
-                (client.find_rims, "диски"),
-            ):
-                # Первая страница нужна ради totalPages, остальные тянем параллельно:
-                # последовательный обход 80+ страниц — это 80 круговых задержек подряд.
-                entries, reported = await finder(page=1)
-                total_pages = min(reported or 1, MAX_PAGES)
-                job.total += total_pages
+            # Источник ассортимента — GetRest по выбранным складам, а НЕ поиск
+            # GetFindTyre: поиск неполон (теряет часть реально имеющихся товаров).
+            # По складам, с которых отгружаем, собираем все коды с остатком.
+            warehouses = cred.selected_warehouses
+            if not warehouses:
+                job.status = "done"
+                job.message = (
+                    "Каталог не собран: не выбрано ни одного склада. "
+                    "Отметьте склады в разделе «Подключения»."
+                )
+                job.finished_at = datetime.now(UTC)
+                await _log(session, supplier_id, job_id, "info", job.message)
                 await session.commit()
+                return
 
-                if total_pages > 1:
-                    sem = asyncio.Semaphore(get_settings().fourtochki_concurrency)
+            codes = sorted(await client.get_rest_codes(warehouses))
+            job.total = len(codes)
+            await session.commit()
+            log.info("GetRest по складам %s: кодов с остатком %s", warehouses, len(codes))
 
-                    async def fetch(page: int, f=finder) -> list[CatalogEntry]:
-                        async with sem:
-                            rows, _ = await f(page=page)
-                            return rows
+            # Цены и остатки по всем складам (для подсказки «где ещё есть сток»
+            # проценка отдаёт whpr по всем складам, не только выбранным).
+            price_rows = await client.get_price_rest_all(codes)
 
-                    rest = await asyncio.gather(
-                        *(fetch(p) for p in range(2, total_pages + 1))
-                    )
-                    for page_entries in rest:
-                        entries.extend(page_entries)
-
-                log.info("4tochki %s: страниц %s, позиций %s", label, total_pages, len(entries))
-
-                id_by_cae |= await _upsert_entries(session, supplier_id, entries)
-                pages_done += total_pages
-                job.processed = pages_done
-                await session.commit()
+            # Базовые записи из проценки: cae + остатки/цены по складам. Атрибуты
+            # (бренд, тип, размеры) добирает GetGoodsInfo следующим шагом.
+            entries = [
+                CatalogEntry(cae=pr.cae, goods_type="", warehouses=pr.warehouses)
+                for pr in price_rows
+                if pr.cae in set(codes)
+            ]
+            id_by_cae = await _upsert_entries(session, supplier_id, entries)
+            job.processed = len(id_by_cae)
+            await session.commit()
 
             await _enrich_attrs(session, client, id_by_cae)
             await session.commit()
 
-            # Остатки пропавших из выдачи НЕ обнуляем здесь. Выдача поиска
-            # (GetFindTyre) нестабильна: пагинация по десяткам тысяч позиций и
-            # изменения каталога в реальном времени приводят к тому, что часть
-            # реально имеющихся товаров в неё не попадает. Обнуление/удаление —
-            # работа sync_stocks: проценка GetGoodsPriceRestByCode по коду точна.
+            # Обнуляем остаток на выбранных складах у товаров, которых GetRest в этот
+            # раз НЕ вернул: раз их нет в остатках склада, значит на нём их нет.
+            # GetRest — полный источник по складу (в отличие от старого поиска), поэтому
+            # обнуление здесь корректно и не задевает данные невыбранных складов.
+            zeroed_stale = await session.execute(
+                text(
+                    """
+                    UPDATE product_stocks s
+                    SET rest = 0, updated_at = now()
+                    FROM products p
+                    WHERE p.id = s.product_id
+                      AND p.supplier_id = :supplier_id
+                      AND s.wrh = ANY(:warehouses)
+                      AND s.rest > 0
+                      AND s.updated_at < :started
+                    """
+                ),
+                {
+                    "supplier_id": supplier_id,
+                    "warehouses": warehouses,
+                    "started": job.started_at,
+                },
+            )
+            log.info("Каталог: обнулено устаревших строк остатка: %s", zeroed_stale.rowcount)
+
             # Снимок агрегатов ДО пересчёта — чтобы показать движение остатка и цен
             # после этого прогона (та же сводка, что у задачи «Цены и остатки»).
             before = {

@@ -339,6 +339,43 @@ class FourTochkiClient:
             lambda c: self.get_price_rest(c, warehouse_ids=warehouse_ids),
         )
 
+    async def get_rest_codes(self, warehouse_ids: list[int]) -> set[str]:
+        """Все CAE с остатком на указанных складах через GetRest — авторитетный
+        источник ассортимента.
+
+        GetFindTyre/GetFindDisk (поиск) неполны: не отдают часть товаров, реально
+        лежащих на складе (напр. отдельные шипованные модели). GetRest по складу
+        возвращает всё, что там есть, — по нему и строим каталог.
+
+        page нумеруется С НУЛЯ; пустая страница — конец.
+        """
+        rest_filter = self._factory(
+            "http://schemas.datacontract.org/2004/07/"
+            "TS3.Domain.Models.Client.ClientSoapService.GetRest",
+            "getRestFilter",
+        )
+
+        async def codes_of(wrh: int) -> set[str]:
+            found: set[str] = set()
+            page = 0
+            while page < 100:  # предохранитель
+                result = await self._call("GetRest", rest_filter(wrh=wrh, page=page))
+                items = _list(getattr(result, "restItems", None))
+                if not items:
+                    break
+                found.update(i.code for i in items if getattr(i, "code", None))
+                page += 1
+            return found
+
+        sem = asyncio.Semaphore(get_settings().fourtochki_concurrency)
+
+        async def one(wrh: int) -> set[str]:
+            async with sem:
+                return await codes_of(wrh)
+
+        results = await asyncio.gather(*(one(w) for w in warehouse_ids))
+        return set().union(*results) if results else set()
+
     async def get_goods_info_all(self, codes: list[str]) -> list[GoodsItem]:
         """Атрибуты по всему списку CAE. Лимит метода — 200 кодов, в 10 раз строже цен."""
         if not codes:

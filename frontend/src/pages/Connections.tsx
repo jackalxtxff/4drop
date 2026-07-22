@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { api, type Credential } from "../api";
+import {
+  api,
+  type Credential,
+  type PlatformMappingView,
+  type WarehouseMappingsView,
+} from "../api";
 import { useSupplier } from "../components/Layout";
 
 const STATUS_STYLE: Record<string, string> = {
@@ -179,11 +184,261 @@ function Scopes({
   );
 }
 
+const MP_LABEL: Record<string, string> = {
+  wb: "Wildberries",
+  ozon: "Ozon",
+};
+
+/** Привязка одной площадки: FBS-склад → мультиселект складов 4tochki, которые его
+ *  обслуживают. Один склад 4tochki можно привязать только к одному FBS-складу —
+ *  поэтому в остальных FBS он показывается недоступным. */
+function PlatformBinding({
+  platform,
+  ftWarehouses,
+  supplierId,
+  onSaved,
+}: {
+  platform: PlatformMappingView;
+  ftWarehouses: WarehouseMappingsView["fourtochki_warehouses"];
+  supplierId: number;
+  onSaved: () => Promise<void>;
+}) {
+  // Локально: склад 4tochki → id FBS-склада, к которому он привязан.
+  const build = () => {
+    const a: Record<number, string> = {};
+    for (const m of platform.mappings) a[m.fourtochki_wrh] = m.fbs_warehouse_id;
+    return a;
+  };
+  const [assign, setAssign] = useState<Record<number, string>>(build);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Извне пришли обновлённые привязки (после сохранения/перезагрузки) — пересобрать.
+  useEffect(() => {
+    setAssign(build());
+    setSaved(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [platform.mappings]);
+
+  const toggle = (fbsId: string, wrh: number) => {
+    setSaved(false);
+    setAssign((a) => {
+      const next = { ...a };
+      if (next[wrh] === fbsId) delete next[wrh];
+      else next[wrh] = fbsId;
+      return next;
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const mappings = Object.entries(assign).map(([wrh, fbs]) => ({
+        fourtochki_wrh: Number(wrh),
+        fbs_warehouse_id: fbs,
+        priority: 0,
+      }));
+      await api.put(
+        `/suppliers/${supplierId}/connections/warehouse-mappings/${platform.platform}`,
+        { mappings },
+      );
+      await onSaved();
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось сохранить привязки");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleFbs = async (fbsId: string, enabled: boolean) => {
+    setError(null);
+    try {
+      await api.put(
+        `/suppliers/${supplierId}/connections/warehouse-mappings/${platform.platform}/fbs/${fbsId}/enabled`,
+        { enabled },
+      );
+      await onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось переключить склад");
+    }
+  };
+
+  const label = MP_LABEL[platform.platform] ?? platform.platform;
+
+  if (!platform.configured || platform.fbs_warehouses.length === 0) {
+    return (
+      <div className="rounded-lg border border-slate-200 p-4 dark:border-slate-800">
+        <p className="font-medium">{label}</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          {platform.message ?? "FBS-складов нет"}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-200 dark:border-slate-800">
+      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3 dark:border-slate-800">
+        <p className="font-medium">{label}</p>
+        <div className="flex items-center gap-3">
+          {saved && <span className="text-xs text-emerald-600 dark:text-emerald-400">Сохранено</span>}
+          <button
+            onClick={() => void save()}
+            disabled={saving}
+            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
+          >
+            {saving ? "Сохранение…" : "Сохранить"}
+          </button>
+        </div>
+      </div>
+
+      {error && <p className="px-4 pt-3 text-sm text-red-600">{error}</p>}
+      {platform.message && (
+        <p className="px-4 pt-3 text-xs text-amber-600 dark:text-amber-400">{platform.message}</p>
+      )}
+
+      <div className="space-y-4 p-4">
+        {platform.fbs_warehouses.map((fbs) => {
+          // Живой суммарный остаток привязанных к этому FBS складов 4tochki —
+          // пересчитывается сразу при переключении чекбоксов, до сохранения.
+          const boundStock = ftWarehouses
+            .filter((w) => assign[w.id] === fbs.id)
+            .reduce((s, w) => s + (w.total_rest ?? 0), 0);
+          return (
+          <div key={fbs.id} className={fbs.enabled ? "" : "opacity-60"}>
+            <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+              <span className="rounded bg-slate-100 px-2 py-0.5 text-xs dark:bg-slate-800">
+                FBS
+              </span>
+              {fbs.name ?? `Склад ${fbs.id}`}
+              <span className="text-xs font-normal text-slate-400">#{fbs.id}</span>
+              <span
+                className={`rounded px-1.5 py-0.5 text-xs font-normal ${
+                  fbs.enabled
+                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                    : "bg-slate-100 text-slate-500 line-through dark:bg-slate-800"
+                }`}
+                title="Реальный остаток привязанных складов 4tochki, который уйдёт на этот FBS-склад (до вычета буфера)"
+              >
+                остаток: {boundStock} шт
+              </span>
+              {!fbs.enabled && (
+                <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs font-normal text-red-600 dark:bg-red-950 dark:text-red-300">
+                  выключен · на площадку 0
+                </span>
+              )}
+              {/* Тумблер вкл/выкл: у выключенного склада остаток обнуляется на площадке. */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={fbs.enabled}
+                onClick={() => void toggleFbs(fbs.id, !fbs.enabled)}
+                title={fbs.enabled ? "Выключить склад (остаток → 0)" : "Включить склад"}
+                className={`relative ml-auto h-5 w-9 shrink-0 rounded-full transition ${
+                  fbs.enabled ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                    fbs.enabled ? "left-[18px]" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {ftWarehouses.map((w) => {
+                const here = assign[w.id] === fbs.id;
+                const elsewhere = assign[w.id] != null && assign[w.id] !== fbs.id;
+                const locked = elsewhere || !fbs.enabled;
+                return (
+                  <label
+                    key={w.id}
+                    className={`flex items-start gap-2 rounded-lg border p-2.5 text-sm transition ${
+                      locked
+                        ? "cursor-not-allowed border-slate-100 opacity-50 dark:border-slate-800"
+                        : here
+                          ? "cursor-pointer border-slate-900 bg-slate-50 dark:border-slate-400 dark:bg-slate-800"
+                          : "cursor-pointer border-slate-200 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={here}
+                      disabled={locked}
+                      onChange={() => toggle(fbs.id, w.id)}
+                      className="mt-0.5"
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate">
+                        {w.name}
+                        <span className="ml-1.5 text-xs font-normal text-slate-400">
+                          {w.total_rest ?? 0} шт
+                        </span>
+                      </span>
+                      {elsewhere && (
+                        <span className="text-xs text-slate-400">уже на другом FBS-складе</span>
+                      )}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function WarehouseBinding({
+  view,
+  supplierId,
+  onSaved,
+}: {
+  view: WarehouseMappingsView;
+  supplierId: number;
+  onSaved: () => Promise<void>;
+}) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+      <h2 className="font-semibold tracking-tight">Привязка складов к FBS</h2>
+      <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+        Отметьте, какие склады 4tochki обслуживают каждый FBS-склад площадки. По этой
+        привязке в заказах определяется, из какой точки поедет товар. Один склад 4tochki
+        можно привязать только к одному FBS-складу.
+      </p>
+
+      {view.fourtochki_warehouses.length === 0 ? (
+        <p className="mt-4 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          Сначала выберите склады 4tochki выше — привязывать пока нечего.
+        </p>
+      ) : (
+        <div className="mt-4 space-y-4">
+          {view.platforms.map((p) => (
+            <PlatformBinding
+              key={p.platform}
+              platform={p}
+              ftWarehouses={view.fourtochki_warehouses}
+              supplierId={supplierId}
+              onSaved={onSaved}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function ConnectionsPage() {
   const { current } = useSupplier();
   const supplierId = current?.id;
 
   const [creds, setCreds] = useState<Credential[]>([]);
+  const [mappings, setMappings] = useState<WarehouseMappingsView | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -196,8 +451,18 @@ export function ConnectionsPage() {
     setCreds(await api.get<Credential[]>(`/suppliers/${supplierId}/connections`));
   };
 
+  const loadMappings = async () => {
+    if (!supplierId) return;
+    setMappings(
+      await api.get<WarehouseMappingsView>(
+        `/suppliers/${supplierId}/connections/warehouse-mappings`,
+      ),
+    );
+  };
+
   useEffect(() => {
     void load();
+    void loadMappings();
   }, [supplierId]);
 
   const byPlatform = (p: string) => creds.find((c) => c.platform === p);
@@ -209,6 +474,9 @@ export function ConnectionsPage() {
     try {
       await fn();
       await load();
+      // Проверка WB/Ozon освежает FBS-склады в БД, смена складов 4tochki — список для
+      // привязки: и то и другое отражаем сразу.
+      await loadMappings();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка");
     } finally {
@@ -402,6 +670,14 @@ export function ConnectionsPage() {
             })}
           </div>
         </section>
+      )}
+
+      {mappings && (
+        <WarehouseBinding
+          view={mappings}
+          supplierId={supplierId!}
+          onSaved={loadMappings}
+        />
       )}
     </div>
   );

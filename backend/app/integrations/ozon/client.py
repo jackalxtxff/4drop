@@ -154,6 +154,76 @@ class OzonClient:
                 return str(value)
         return None
 
+    # --- склады и заказы FBS (основа) -----------------------------------
+
+    async def list_fbs_warehouses(self) -> list[dict]:
+        """FBS-склады продавца: POST /v1/warehouse/list → [{"id": str, "name": str}].
+
+        Ozon возвращает warehouse_id числом; приводим к строке для единообразия с WB.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            resp = await http.post(
+                f"{BASE}/v1/warehouse/list", headers=self._headers, json={}
+            )
+        if resp.status_code != 200:
+            raise OzonError(f"Склады Ozon: {_message(resp)}")
+        result = resp.json().get("result") or []
+        return [
+            {"id": str(w.get("warehouse_id")), "name": w.get("name")}
+            for w in result
+        ]
+
+    async def fbs_orders(self, *, days: int = 14) -> list[dict]:
+        """Отправления FBS (основа): POST /v3/posting/fbs/list.
+
+        Возвращает нормализованные заказы в том же формате, что WB.fbs_orders:
+          {mp_order_id, mp_status, created_at, fbs_warehouse_id,
+           offer_id, ozon_sku, article, qty, price}
+
+        Одно отправление Ozon может содержать несколько позиций (products) — в отличие
+        от построчных заданий WB. На этом этапе (основа) разворачиваем в одну строку на
+        позицию, чтобы структура совпадала с WB; сборку в мультитоварный заказ добавим
+        вместе с боевым сценарием Ozon.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        since = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        to = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        rows: list[dict] = []
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            resp = await http.post(
+                f"{BASE}/v3/posting/fbs/list",
+                headers=self._headers,
+                json={
+                    "dir": "DESC",
+                    "filter": {"since": since, "to": to},
+                    "limit": 1000,
+                    "offset": 0,
+                    "with": {},
+                },
+            )
+        if resp.status_code != 200:
+            raise OzonError(f"Заказы Ozon: {_message(resp)}")
+        postings = (resp.json().get("result") or {}).get("postings") or []
+        for p in postings:
+            wid = p.get("delivery_method", {}).get("warehouse_id") or p.get("warehouse_id")
+            for item in p.get("products") or []:
+                rows.append(
+                    {
+                        "mp_order_id": str(p.get("posting_number")),
+                        "mp_status": p.get("status"),
+                        "created_at": p.get("in_process_at") or p.get("created_at"),
+                        "fbs_warehouse_id": str(wid) if wid is not None else None,
+                        "offer_id": item.get("offer_id"),
+                        "ozon_sku": item.get("sku"),
+                        "article": item.get("offer_id"),
+                        "qty": item.get("quantity") or 1,
+                        "price": float(item.get("price") or 0),
+                    }
+                )
+        return rows
+
     # --- цены и остатки -------------------------------------------------
 
     async def update_prices(self, items: list[dict]) -> tuple[int, str | None]:

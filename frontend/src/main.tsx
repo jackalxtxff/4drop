@@ -10,6 +10,7 @@ import { auth } from "./api";
 initTheme();
 import { ConnectionsPage } from "./pages/Connections";
 import { LoginPage } from "./pages/Login";
+import { OrdersPage } from "./pages/Orders";
 import { ProductsPage } from "./pages/Products";
 import { SyncPage } from "./pages/Sync";
 
@@ -31,6 +32,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           }
         >
           <Route path="/products" element={<ProductsPage />} />
+          <Route path="/orders" element={<OrdersPage />} />
           <Route path="/connections" element={<ConnectionsPage />} />
           <Route path="/sync" element={<SyncPage />} />
         </Route>

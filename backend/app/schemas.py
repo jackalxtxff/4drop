@@ -73,6 +73,9 @@ class WarehouseOut(BaseModel):
     logistic_days: int | None = None
     have_delivery: bool = False
     is_paid_delivery: bool = False
+    # Реальный остаток на складе (сумма по всем товарам). Заполняется в представлении
+    # привязки складов, чтобы было видно, сколько штук уходит на FBS-склад.
+    total_rest: int | None = None
 
 
 class CredentialOut(BaseModel):
@@ -252,3 +255,97 @@ class SyncJobPage(BaseModel):
     total: int
     offset: int
     limit: int
+
+
+# --- заказы и привязки складов ----------------------------------------------
+
+
+class OrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    platform: str
+    mp_order_id: str
+    mp_status: str | None
+    is_test: bool = False
+
+    # Куда на маркетплейсе и откуда со склада 4tochki
+    fbs_warehouse_id: str | None
+    fbs_warehouse_name: str | None
+    source_warehouse_id: int | None
+    source_warehouse_name: str | None
+
+    # Заказ в 4tochki (создаётся отдельным действием, в тесте — is_test)
+    supplier_order_id: int | None
+    supplier_order_number: str | None
+    supplier_status: str | None
+
+    items: list = []
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class OrdersSyncPlatform(BaseModel):
+    """Итог синхронизации по одной площадке — чтобы не терять причину пустого списка."""
+
+    platform: str
+    ok: bool
+    fetched: int = 0
+    message: str | None = None
+
+
+class OrdersSyncResult(BaseModel):
+    orders: list[OrderOut] = []
+    platforms: list[OrdersSyncPlatform] = []
+
+
+class FbsWarehouseOut(BaseModel):
+    """FBS-склад маркетплейса из его API."""
+
+    id: str
+    name: str | None = None
+    # Выключенный склад: на него публикуется остаток 0 (товар с него не продаётся).
+    enabled: bool = True
+
+
+class FbsToggleIn(BaseModel):
+    enabled: bool
+
+
+class WarehouseMappingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    fourtochki_wrh: int
+    fbs_warehouse_id: str
+    fbs_warehouse_name: str | None = None
+    priority: int = 0
+
+
+class WarehouseMappingItemIn(BaseModel):
+    """Одна привязка: склад 4tochki → FBS-склад площадки."""
+
+    fourtochki_wrh: int
+    fbs_warehouse_id: str
+    priority: int = 0
+
+
+class WarehouseMappingsIn(BaseModel):
+    """Полный набор привязок для площадки — заменяет прежний целиком."""
+
+    mappings: list[WarehouseMappingItemIn] = []
+
+
+class PlatformMappingView(BaseModel):
+    """Что показать в блоке привязки для одной площадки."""
+
+    platform: str
+    configured: bool                      # заданы ли доступы к площадке
+    available: bool                       # удалось ли получить FBS-склады из API
+    message: str | None = None            # почему недоступно (нет доступов / ошибка API)
+    fbs_warehouses: list[FbsWarehouseOut] = []
+    mappings: list[WarehouseMappingOut] = []
+
+
+class WarehouseMappingsView(BaseModel):
+    # Выбранные склады 4tochki — их и привязываем к FBS-складам.
+    fourtochki_warehouses: list[WarehouseOut] = []
+    platforms: list[PlatformMappingView] = []

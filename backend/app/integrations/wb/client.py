@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
@@ -295,6 +296,87 @@ class WBClient:
                 raise WBError(f"Не удалось создать склад FBS: {_detail(created)}")
             return created.json()["id"]
 
+    async def list_fbs_warehouses(self) -> list[dict]:
+        """Склады FBS продавца: [{"id": str, "name": str, "office_id": int|None}].
+
+        Именно на эти склады WB кладёт сборочные задания (order.warehouseId), и к ним
+        пользователь привязывает склады 4tochki. Пусто у свежего продавца — тогда
+        сначала нужно создать склад (ensure_warehouse) или в кабинете WB.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            resp = await http.get(f"{self._marketplace}/api/v3/warehouses", headers=self._headers)
+        if resp.status_code != 200:
+            raise WBError(f"Склады FBS: HTTP {resp.status_code} — {_detail(resp)}")
+        data = resp.json()
+        return [
+            {"id": str(w.get("id")), "name": w.get("name"), "office_id": w.get("officeId")}
+            for w in (data if isinstance(data, list) else [])
+        ]
+
+    async def fbs_orders(self, *, days: int = 14) -> list[dict]:
+        """Сборочные задания FBS в нормализованном виде.
+
+        Тянем новые задания (/orders/new — то, что ждёт сборки) и историю за `days`
+        (/orders — чтобы список не был пустым, если новых сейчас нет), склеиваем по id.
+        Заказы WB построчные: одно задание = одна позиция. Цена приходит в копейках.
+
+        Возвращает список словарей:
+          {mp_order_id, mp_status, created_at, fbs_warehouse_id,
+           nm_id, chrt_id, article, barcode, qty, price}
+        """
+        collected: dict[str, dict] = {}
+        any_ok = False          # хоть один запрос ответил 200
+        last_detail = ""        # причина последнего сбоя — для понятной ошибки
+
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            # 1) Новые (ещё не в поставке) сборочные задания — главный источник.
+            try:
+                new = await http.get(
+                    f"{self._marketplace}/api/v3/orders/new", headers=self._headers
+                )
+                if new.status_code == 200:
+                    any_ok = True
+                    for o in new.json().get("orders") or []:
+                        row = _normalize_wb_order(o, status="new")
+                        collected[row["mp_order_id"]] = row
+                else:
+                    last_detail = f"HTTP {new.status_code} — {_detail(new)}"
+            except httpx.HTTPError as exc:
+                last_detail = exc.__class__.__name__
+
+            # 2) История за период — вспомогательная, best-effort. dateFrom в unix-секундах,
+            # WB отдаёт постранично курсором next. Её 429/ошибку НЕ превращаем в отказ:
+            # песочница WB жёстко лимитирует историю, а новые задания важнее.
+            date_from = _epoch_days_ago(days)
+            next_cursor = 0
+            for _ in range(20):  # предохранитель от бесконечного курсора
+                resp = await http.get(
+                    f"{self._marketplace}/api/v3/orders",
+                    headers=self._headers,
+                    params={"limit": 1000, "next": next_cursor, "dateFrom": date_from},
+                )
+                if resp.status_code != 200:
+                    last_detail = last_detail or f"HTTP {resp.status_code} — {_detail(resp)}"
+                    break
+                any_ok = True
+                body = resp.json()
+                orders = body.get("orders") or []
+                for o in orders:
+                    row = _normalize_wb_order(o, status=o.get("status") or "confirm")
+                    # не затираем более точный статус «new», если задание уже в collected
+                    collected.setdefault(row["mp_order_id"], row)
+                next_cursor = body.get("next") or 0
+                if len(orders) < 1000 or not next_cursor:
+                    break
+                await asyncio.sleep(self.PAUSE_SECONDS)
+
+        # Раз ни один запрос не прошёл — это настоящая ошибка (нет доступа/лимит), а не
+        # «заказов нет». Пусть вызывающий покажет причину, а не молчаливый ноль.
+        if not any_ok:
+            raise WBError(f"Заказы FBS: {last_detail or 'нет ответа'}")
+
+        return list(collected.values())
+
     async def current_prices(self) -> dict[int, tuple[int, int]]:
         """nmID → (цена до скидки, процент скидки). Нужно, чтобы не слать неизменённое:
         WB отклоняет ВЕСЬ батч, если хоть одна пара цена+скидка уже установлена."""
@@ -402,3 +484,34 @@ def _detail(resp: httpx.Response) -> str:
         )[:200]
     except ValueError:
         return resp.text[:200]
+
+
+def _epoch_days_ago(days: int) -> int:
+    """Unix-секунды N дней назад. Через loop.time нельзя — нужен именно календарный
+    момент, поэтому берём now(). Вынесено, чтобы fbs_orders читался без деталей.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    return int((datetime.now(UTC) - timedelta(days=days)).timestamp())
+
+
+def _normalize_wb_order(o: dict, *, status: str) -> dict:
+    """Сырое сборочное задание WB → плоский словарь для сохранения в Order.
+
+    Цена у WB в копейках (convertedPrice/price) — переводим в рубли. skus — список
+    штрихкодов, берём первый: по нему сопоставим товар, если не сойдётся по nmId/chrtId.
+    """
+    skus = o.get("skus") or []
+    price_kopecks = o.get("convertedPrice") or o.get("price") or 0
+    return {
+        "mp_order_id": str(o.get("id")),
+        "mp_status": status,
+        "created_at": o.get("createdAt"),
+        "fbs_warehouse_id": str(o["warehouseId"]) if o.get("warehouseId") is not None else None,
+        "nm_id": o.get("nmId"),
+        "chrt_id": o.get("chrtId"),
+        "article": o.get("article"),
+        "barcode": skus[0] if skus else None,
+        "qty": 1,  # сборочное задание WB — всегда одна позиция
+        "price": round(price_kopecks / 100, 2),
+    }

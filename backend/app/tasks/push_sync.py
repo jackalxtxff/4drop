@@ -27,12 +27,40 @@ from app.models import (
     Platform,
     Product,
     ProductLink,
+    ProductStock,
     SyncJob,
     SyncSettings,
+    WarehouseMapping,
 )
 from app.formula import FormulaError, compile_formula, evaluate
 from app.security import decrypt_secret
 from app.stock import marketplace_stock
+
+
+def _wh_stock_items(
+    rows: list,
+    stock_by_prod: dict[int, dict[int, int]],
+    bound: list[int],
+    is_disabled: bool,
+    buffer: int,
+) -> list[dict]:
+    """Остатки для одного FBS-склада: по штрихкоду, только со связанных складов 4tochki.
+
+    Выключенный склад, заблокированный товар или склад без привязки → остаток 0
+    (товар с него не продаётся). Иначе — сумма остатков по привязанным складам 4tochki
+    минус буфер. rows — список (ProductLink, Product).
+    """
+    items: list[dict] = []
+    for link, product in rows:
+        if not link.barcode:
+            continue
+        if is_disabled or product.sync_blocked or not bound:
+            amount = 0
+        else:
+            real = sum(stock_by_prod.get(product.id, {}).get(w, 0) for w in bound)
+            amount = marketplace_stock(real, buffer)
+        items.append({"sku": link.barcode, "amount": amount})
+    return items
 
 
 async def _wb_credential(session: AsyncSession, supplier_id: int) -> Credential | None:
@@ -89,17 +117,15 @@ async def push_wb(
         return "info", "Нет активных карточек WB — отправлять нечего"
 
     price_items: list[dict] = []
-    stock_items: list[dict] = []
     no_price = 0
 
     blocked = 0
     for link, product in rows:
-        # Заблокированный товар: цену и атрибуты не трогаем, остаток форсим в 0 —
-        # чтобы карточка не продавала снятое с продажи, но и не пересоздавалась.
+        # Заблокированный товар: цену и атрибуты не трогаем (остаток форсим в 0 ниже,
+        # при сборке остатков по складам) — чтобы карточка не продавала снятое, но и
+        # не пересоздавалась.
         if product.sync_blocked:
             blocked += 1
-            if link.barcode:
-                stock_items.append({"sku": link.barcode, "amount": 0})
             continue
 
         price = (
@@ -126,11 +152,6 @@ async def push_wb(
         elif not price:
             no_price += 1
 
-        if link.barcode:
-            stock_items.append(
-                {"sku": link.barcode, "amount": marketplace_stock(product.total_rest, buffer)}
-            )
-
     client = WBClient(api_key)
 
     # Отправляем только изменившиеся цены: WB валит весь батч, если хоть одна цена
@@ -145,17 +166,59 @@ async def push_wb(
 
     priced, price_err = await client.update_prices(changed)
 
-    # Склад продавца нужен один раз — запоминаем в credential.
-    warehouse_id = (cred.settings or {}).get("warehouse_id")
+    # --- остатки по FBS-складам ---------------------------------------------
+    # На каждый FBS-склад публикуем остаток ТОЛЬКО тех складов 4tochki, что к нему
+    # привязаны (WarehouseMapping). Выключенный склад (settings['fbs_disabled']) —
+    # обнуляем. Несвязанный включённый склад не трогаем: источник для него не задан.
+    mp_map: dict[str, list[int]] = {}
+    for m in (
+        await session.execute(
+            select(WarehouseMapping).where(
+                WarehouseMapping.supplier_id == supplier_id,
+                WarehouseMapping.platform == Platform.WB,
+            )
+        )
+    ).scalars():
+        mp_map.setdefault(m.fbs_warehouse_id, []).append(m.fourtochki_wrh)
+
+    disabled = set((cred.settings or {}).get("fbs_disabled") or [])
+    fbs_names = {
+        w["id"]: w.get("name") for w in ((cred.settings or {}).get("fbs_warehouses") or [])
+    }
+
+    # Остатки по складам для активных товаров: product_id -> {wrh: rest}.
+    active_ids = [p.id for _l, p in rows]
+    stock_by_prod: dict[int, dict[int, int]] = {}
+    if active_ids:
+        for pid, wrh, rest in (
+            await session.execute(
+                select(ProductStock.product_id, ProductStock.wrh, ProductStock.rest).where(
+                    ProductStock.product_id.in_(active_ids)
+                )
+            )
+        ).all():
+            stock_by_prod.setdefault(pid, {})[wrh] = rest
+
+    # Обрабатываем склады, у которых есть привязка ИЛИ которые выключены (их обнуляем).
+    fbs_ids = set(mp_map) | disabled
     stock_err: str | None = None
     stocked = 0
-    try:
-        if warehouse_id is None:
-            warehouse_id = await client.ensure_warehouse()
-            cred.settings = {**(cred.settings or {}), "warehouse_id": warehouse_id}
-        stocked, stock_err = await client.update_stocks(warehouse_id, stock_items)
-    except WBError as exc:
-        stock_err = str(exc)
+    stock_notes: list[str] = []
+    for fbs_id in sorted(fbs_ids):
+        is_disabled = fbs_id in disabled
+        bound = mp_map.get(fbs_id, [])
+        items = _wh_stock_items(rows, stock_by_prod, bound, is_disabled, buffer)
+        if not items:
+            continue
+        try:
+            sent, err = await client.update_stocks(int(fbs_id), items)
+            stocked += sent
+            name = fbs_names.get(fbs_id, fbs_id)
+            stock_notes.append(f"{name}{' (выкл→0)' if is_disabled else ''}: {sent}")
+            if err:
+                stock_err = err
+        except (WBError, ValueError) as exc:
+            stock_err = str(exc)
 
     job.processed = priced + stocked
 
@@ -163,7 +226,11 @@ async def push_wb(
     priced_msg = f"Цены: обновлено {priced}"
     if up_to_date:
         priced_msg += f", уже актуальны {up_to_date}"
-    parts = [f"[{env}] {priced_msg}", f"остатки: {stocked}/{len(stock_items)}"]
+    parts = [f"[{env}] {priced_msg}"]
+    if stock_notes:
+        parts.append("остатки → " + ", ".join(stock_notes))
+    elif not fbs_ids:
+        parts.append("остатки: нет привязанных FBS-складов — задайте привязку на «Подключениях»")
     if buffer:
         parts.append(f"буфер {buffer}")
     if blocked:

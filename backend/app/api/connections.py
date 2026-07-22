@@ -2,24 +2,41 @@ import json
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from app.deps import SessionDep, SupplierDep
 from app.integrations.fourtochki.client import FourTochkiClient, FourTochkiError
-from app.integrations.ozon.client import OzonClient
-from app.integrations.wb.client import WBClient
-from app.models import ConnectionStatus, Credential, Platform
+from app.integrations.ozon.client import OzonClient, OzonError
+from app.integrations.wb.client import WBClient, WBError
+from app.models import (
+    ConnectionStatus,
+    Credential,
+    Platform,
+    Product,
+    ProductStock,
+    WarehouseMapping,
+)
 from app.schemas import (
     CredentialOut,
+    FbsToggleIn,
+    FbsWarehouseOut,
     FourTochkiCredentialIn,
     OzonCredentialIn,
+    PlatformMappingView,
+    WarehouseMappingOut,
+    WarehouseMappingsIn,
+    WarehouseMappingsView,
     WarehouseOut,
     WBCredentialIn,
 )
 from app.security import decrypt_secret, encrypt_secret, mask_secret
 from app.tasks.catalog_sync import recompute_aggregates
+from app.tasks.enqueue import enqueue_kind
 
 router = APIRouter(prefix="/suppliers/{supplier_id}/connections", tags=["connections"])
+
+# Площадки маркетплейсов, к FBS-складам которых привязываем склады 4tochki.
+MP_PLATFORMS = (Platform.WB, Platform.OZON)
 
 
 async def _get_or_create(session: SessionDep, supplier_id: int, platform: str) -> Credential:
@@ -62,6 +79,37 @@ def _store_secrets(cred: Credential, secrets: dict[str, str]) -> None:
     cred.secrets_masked = {k: mask_secret(v) for k, v in clean.items() if k != "login"}
     if "login" in clean:
         cred.secrets_masked["login"] = clean["login"]  # логин не секрет, показываем целиком
+
+
+def _mp_client(platform: str, secrets: dict[str, str]):
+    """Клиент площадки маркетплейса по её секретам, или None для неизвестной."""
+    if platform == Platform.WB:
+        return WBClient(secrets["api_key"])
+    if platform == Platform.OZON:
+        return OzonClient(secrets["client_id"], secrets["api_key"])
+    return None
+
+
+async def _refresh_fbs_cache(cred: Credential) -> tuple[list[dict], str | None]:
+    """Стянуть FBS-склады площадки и сохранить их в cred.settings['fbs_warehouses'].
+
+    FBS-склады храним в БД, чтобы UI привязки не дёргал лимитируемый API площадки на
+    каждой отрисовке (WB-песочница отвечает 429 по глобальному лимитеру). Возвращает
+    (склады, ошибка|None); при успехе кэш в cred обновлён (коммит — на вызывающем),
+    при ошибке отдаём ранее сохранённый список.
+    """
+    client = _mp_client(cred.platform, load_secrets(cred))
+    if client is None:
+        return [], "Неизвестная площадка"
+    try:
+        whs = await client.list_fbs_warehouses()
+    except (WBError, OzonError) as exc:
+        cached = (cred.settings or {}).get("fbs_warehouses") or []
+        return [{"id": w["id"], "name": w.get("name")} for w in cached], str(exc)
+    slim = [{"id": w["id"], "name": w.get("name")} for w in whs]
+    # settings — JSONB; переприсваиваем целиком, иначе SQLAlchemy не заметит мутацию.
+    cred.settings = {**(cred.settings or {}), "fbs_warehouses": slim}
+    return slim, None
 
 
 @router.get("", response_model=list[CredentialOut])
@@ -187,6 +235,17 @@ async def check_wb(supplier: SupplierDep, session: SessionDep) -> Credential:
     cred.status_message = message
     cred.account_name = await client.seller_name() if ok else None
     cred.checked_at = datetime.now(UTC)
+    # Заодно обновляем в БД список FBS-складов — чтобы страница привязки читала их из
+    # базы, а не дёргала лимитируемый API. Ошибку тут не раздуваем: подключение важнее.
+    if ok:
+        try:
+            whs = await client.list_fbs_warehouses()
+            cred.settings = {
+                **(cred.settings or {}),
+                "fbs_warehouses": [{"id": w["id"], "name": w.get("name")} for w in whs],
+            }
+        except WBError:
+            pass
     await session.commit()
     await session.refresh(cred)
     return cred
@@ -204,6 +263,15 @@ async def check_ozon(supplier: SupplierDep, session: SessionDep) -> Credential:
     cred.status_message = message
     cred.account_name = await client.seller_name() if ok else None
     cred.checked_at = datetime.now(UTC)
+    if ok:
+        try:
+            whs = await client.list_fbs_warehouses()
+            cred.settings = {
+                **(cred.settings or {}),
+                "fbs_warehouses": [{"id": w["id"], "name": w.get("name")} for w in whs],
+            }
+        except OzonError:
+            pass
     await session.commit()
     await session.refresh(cred)
     return cred
@@ -234,3 +302,196 @@ async def set_warehouses(
     await session.commit()
     await session.refresh(cred)
     return cred
+
+
+# --- привязка складов 4tochki к FBS-складам площадок -------------------------
+
+
+async def _platform_cred(
+    session: SessionDep, supplier_id: int, platform: str
+) -> Credential | None:
+    return (
+        await session.execute(
+            select(Credential).where(
+                Credential.supplier_id == supplier_id, Credential.platform == platform
+            )
+        )
+    ).scalar_one_or_none()
+
+
+@router.get("/warehouse-mappings", response_model=WarehouseMappingsView)
+async def get_warehouse_mappings(
+    supplier: SupplierDep, session: SessionDep
+) -> WarehouseMappingsView:
+    """Данные для блока привязки: выбранные склады 4tochki, FBS-склады площадок (из БД)
+    и сохранённые привязки. FBS-склады читаем из cred.settings — их кладёт туда проверка
+    подключения. Если кэш пуст, делаем одну живую попытку и сохраняем результат.
+    """
+    ft_cred = await _platform_cred(session, supplier.id, Platform.FOURTOCHKI)
+    selected_ids = set(ft_cred.selected_warehouses) if ft_cred else set()
+
+    # Реальный остаток по каждому складу 4tochki (сумма по всем товарам поставщика) —
+    # чтобы в привязке было видно, сколько штук даёт склад и сколько уйдёт на FBS.
+    stock_by_wrh: dict[int, int] = {
+        wrh: int(total or 0)
+        for wrh, total in (
+            await session.execute(
+                select(ProductStock.wrh, func.sum(ProductStock.rest))
+                .join(Product, Product.id == ProductStock.product_id)
+                .where(Product.supplier_id == supplier.id)
+                .group_by(ProductStock.wrh)
+            )
+        ).all()
+    }
+
+    ft_warehouses = [
+        WarehouseOut(
+            **{k: w.get(k) for k in ("id", "name", "short_name", "logistic_days")},
+            total_rest=stock_by_wrh.get(w["id"], 0),
+        )
+        for w in (ft_cred.warehouses if ft_cred else [])
+        if w["id"] in selected_ids
+    ]
+
+    saved: dict[str, list[WarehouseMapping]] = {}
+    for m in (
+        await session.execute(
+            select(WarehouseMapping).where(WarehouseMapping.supplier_id == supplier.id)
+        )
+    ).scalars().all():
+        saved.setdefault(m.platform, []).append(m)
+
+    platforms: list[PlatformMappingView] = []
+    cache_updated = False
+    for platform in MP_PLATFORMS:
+        cred = await _platform_cred(session, supplier.id, platform)
+        configured = cred is not None and bool(cred.secrets_encrypted)
+        view = PlatformMappingView(
+            platform=platform,
+            configured=configured,
+            available=False,
+            mappings=[WarehouseMappingOut.model_validate(m) for m in saved.get(platform, [])],
+        )
+        if not configured:
+            view.message = "Доступы к площадке не заданы"
+        else:
+            fbs = (cred.settings or {}).get("fbs_warehouses") or []
+            error = None
+            if not fbs:  # кэш пуст — одна живая попытка (и сохранение)
+                fbs, error = await _refresh_fbs_cache(cred)
+                cache_updated = cache_updated or error is None
+            disabled = set((cred.settings or {}).get("fbs_disabled") or [])
+            view.fbs_warehouses = [
+                FbsWarehouseOut(id=w["id"], name=w.get("name"), enabled=w["id"] not in disabled)
+                for w in fbs
+            ]
+            view.available = bool(fbs)
+            if not fbs:
+                view.message = (
+                    f"Не удалось получить FBS-склады: {error}"
+                    if error
+                    else "На площадке нет FBS-складов — создайте склад в кабинете и проверьте подключение"
+                )
+        platforms.append(view)
+
+    if cache_updated:
+        await session.commit()
+
+    return WarehouseMappingsView(fourtochki_warehouses=ft_warehouses, platforms=platforms)
+
+
+@router.put("/warehouse-mappings/{platform}", response_model=WarehouseMappingsView)
+async def set_warehouse_mappings(
+    platform: str,
+    payload: WarehouseMappingsIn,
+    supplier: SupplierDep,
+    session: SessionDep,
+) -> WarehouseMappingsView:
+    """Заменить привязки складов для площадки целиком.
+
+    Проще заменять полностью, чем дифать: набор маленький, а частичные правки на клиенте
+    легко рассинхронизировать с сервером.
+    """
+    if platform not in MP_PLATFORMS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неизвестная площадка")
+
+    # Привязывать можно только выбранные склады 4tochki — иначе заказ уедет со склада,
+    # остатки которого мы не публикуем.
+    ft_cred = await _platform_cred(session, supplier.id, Platform.FOURTOCHKI)
+    selected = set(ft_cred.selected_warehouses) if ft_cred else set()
+    bad = [m.fourtochki_wrh for m in payload.mappings if m.fourtochki_wrh not in selected]
+    if bad:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Склады 4tochki не в списке выбранных: {sorted(set(bad))}",
+        )
+
+    # Один склад 4tochki — максимум к одному FBS-складу (ограничение модели). Ловим
+    # дубли заранее, иначе UNIQUE-constraint отдаст невнятную 500.
+    seen: set[int] = set()
+    dup = [m.fourtochki_wrh for m in payload.mappings if m.fourtochki_wrh in seen or seen.add(m.fourtochki_wrh)]
+    if dup:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Склад 4tochki привязан к нескольким FBS-складам: {sorted(set(dup))}",
+        )
+
+    # Имена FBS-складов берём из кэша в БД — без лишнего живого запроса к площадке.
+    cred = await _platform_cred(session, supplier.id, platform)
+    cached = (cred.settings or {}).get("fbs_warehouses") if cred else None
+    name_by_id = {w["id"]: w.get("name") for w in (cached or [])}
+
+    await session.execute(
+        delete(WarehouseMapping).where(
+            WarehouseMapping.supplier_id == supplier.id,
+            WarehouseMapping.platform == platform,
+        )
+    )
+    for m in payload.mappings:
+        session.add(
+            WarehouseMapping(
+                supplier_id=supplier.id,
+                platform=platform,
+                fourtochki_wrh=m.fourtochki_wrh,
+                fbs_warehouse_id=m.fbs_warehouse_id,
+                fbs_warehouse_name=name_by_id.get(m.fbs_warehouse_id),
+                priority=m.priority,
+            )
+        )
+    await session.commit()
+    return await get_warehouse_mappings(supplier, session)
+
+
+@router.put("/warehouse-mappings/{platform}/fbs/{fbs_id}/enabled", response_model=WarehouseMappingsView)
+async def set_fbs_enabled(
+    platform: str,
+    fbs_id: str,
+    payload: FbsToggleIn,
+    supplier: SupplierDep,
+    session: SessionDep,
+) -> WarehouseMappingsView:
+    """Включить/выключить FBS-склад. Состояние храним в settings['fbs_disabled'].
+
+    При выключении остаток на складе нужно обнулить — ставим задачу пуша: она зальёт
+    на выключенный склад нули (см. push_wb). Так пользователю не нужно отдельно жать
+    «отправить остатки», а логика обнуления живёт в одном месте.
+    """
+    if platform not in MP_PLATFORMS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неизвестная площадка")
+    cred = await _platform_cred(session, supplier.id, platform)
+    if cred is None or not cred.secrets_encrypted:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Доступы к площадке не заданы")
+
+    disabled = set((cred.settings or {}).get("fbs_disabled") or [])
+    if payload.enabled:
+        disabled.discard(fbs_id)
+    else:
+        disabled.add(fbs_id)
+    cred.settings = {**(cred.settings or {}), "fbs_disabled": sorted(disabled)}
+    await session.commit()
+
+    if not payload.enabled:
+        # Обнулить остаток на выключенном складе — через обычный пуш.
+        await enqueue_kind(session, supplier.id, "push")
+
+    return await get_warehouse_mappings(supplier, session)

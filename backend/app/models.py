@@ -310,10 +310,66 @@ class Order(Base):
     supplier_order_number: Mapped[str | None] = mapped_column(String(64))
     supplier_status: Mapped[str | None] = mapped_column(String(64))
 
-    items: Mapped[list] = mapped_column(JSONB, default=list)  # [{cae, qty, price}]
+    # Куда заказ едет на маркетплейсе: FBS-склад продавца, на который пришло
+    # сборочное задание (WB order.warehouseId / Ozon posting.warehouse_id).
+    fbs_warehouse_id: Mapped[str | None] = mapped_column(String(64))
+    fbs_warehouse_name: Mapped[str | None] = mapped_column(String(255))
+
+    # Откуда берём товар: склад 4tochki, выбранный по привязке WarehouseMapping для
+    # этого FBS-склада (с учётом наличия остатка). Проставляется при синхронизации
+    # заказов, чтобы было видно «из какого склада точки поедет заказ».
+    source_warehouse_id: Mapped[int | None] = mapped_column(Integer)
+    source_warehouse_name: Mapped[str | None] = mapped_column(String(255))
+
+    items: Mapped[list] = mapped_column(JSONB, default=list)  # [{cae, name, qty, price, nm_id, chrt_id}]
     error: Mapped[str | None] = mapped_column(Text)
 
+    # Тестовый заказ из песочницы маркетплейса — не настоящая продажа. Показываем
+    # бейджем, чтобы тестовые заказы нельзя было спутать с боевыми.
+    is_test: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class WarehouseMapping(Base):
+    """Привязка склада 4tochki к FBS-складу маркетплейса.
+
+    FBS: у продавца на площадке есть свои склады, а физически товар лежит на складах
+    4tochki. Эта таблица говорит, какой склад 4tochki обслуживает какой FBS-склад —
+    по ней при заказе понимаем, из какой точки его собирать.
+
+    Ключ — (поставщик, площадка, склад 4tochki): каждый выбранный склад 4tochki
+    привязывается максимум к одному FBS-складу. Несколько складов 4tochki могут
+    указывать на один FBS-склад; при заказе среди них выбирается тот, где есть
+    остаток (по priority — меньше значит предпочтительнее).
+    """
+
+    __tablename__ = "warehouse_mappings"
+    __table_args__ = (
+        UniqueConstraint(
+            "supplier_id", "platform", "fourtochki_wrh", name="uq_whmap_source"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    supplier_id: Mapped[int] = mapped_column(
+        ForeignKey("suppliers.id", ondelete="CASCADE"), index=True
+    )
+    platform: Mapped[str] = mapped_column(String(32))  # wb | ozon
+
+    # Склад 4tochki (id из GetWarehouses). Должен быть среди выбранных складов кредов.
+    fourtochki_wrh: Mapped[int] = mapped_column(Integer)
+
+    # FBS-склад маркетплейса. id у площадок числовой, но храним строкой — у WB и Ozon
+    # разные пространства id, строка избавляет от путаницы типов.
+    fbs_warehouse_id: Mapped[str] = mapped_column(String(64))
+    fbs_warehouse_name: Mapped[str | None] = mapped_column(String(255))
+
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

@@ -82,6 +82,7 @@ export interface Warehouse {
   logistic_days: number | null;
   have_delivery: boolean;
   is_paid_delivery: boolean;
+  total_rest?: number | null;
 }
 
 export type ConnectionStatus = "not_configured" | "ok" | "error";
@@ -222,4 +223,74 @@ export interface SyncJob {
   message: string | null;
   started_at: string;
   finished_at: string | null;
+}
+
+// --- заказы и привязка складов ---------------------------------------------
+
+export interface OrderItem {
+  cae: string | null;
+  name: string | null;
+  qty: number;
+  price: number | null;
+  nm_id?: number | null;
+  chrt_id?: number | null;
+  offer_id?: string | null;
+}
+
+export interface Order {
+  id: number;
+  platform: "wb" | "ozon";
+  mp_order_id: string;
+  mp_status: string | null;
+  is_test: boolean;
+  fbs_warehouse_id: string | null;
+  fbs_warehouse_name: string | null;
+  source_warehouse_id: number | null;
+  source_warehouse_name: string | null;
+  supplier_order_id: number | null;
+  supplier_order_number: string | null;
+  supplier_status: string | null;
+  items: OrderItem[];
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrdersSyncPlatform {
+  platform: string;
+  ok: boolean;
+  fetched: number;
+  message: string | null;
+}
+
+export interface OrdersSyncResult {
+  orders: Order[];
+  platforms: OrdersSyncPlatform[];
+}
+
+export interface FbsWarehouse {
+  id: string;
+  name: string | null;
+  enabled: boolean;
+}
+
+export interface WarehouseMapping {
+  fourtochki_wrh: number;
+  fbs_warehouse_id: string;
+  fbs_warehouse_name: string | null;
+  priority: number;
+}
+
+export interface PlatformMappingView {
+  platform: "wb" | "ozon";
+  configured: boolean;
+  available: boolean;
+  message: string | null;
+  fbs_warehouses: FbsWarehouse[];
+  mappings: WarehouseMapping[];
+}
+
+export interface WarehouseMappingsView {
+  fourtochki_warehouses: Warehouse[];
+  platforms: PlatformMappingView[];
 }

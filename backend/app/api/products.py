@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import Select, delete, func, or_, select, update
 
 from app.config import get_settings
 from app.deps import SessionDep, SupplierDep
@@ -28,6 +28,7 @@ from app.schemas import (
     ProductPage,
     ProductStockOut,
     SyncJobOut,
+    UnlinkRequest,
 )
 
 router = APIRouter(prefix="/suppliers/{supplier_id}/products", tags=["products"])
@@ -252,6 +253,76 @@ async def block_products(
     await enqueue_kind(session, supplier.id, "push")
 
     return {"updated": result.rowcount or 0, "blocked": payload.blocked}
+
+
+@router.post("/unlink", status_code=status.HTTP_200_OK)
+async def unlink_integration(
+    payload: UnlinkRequest, supplier: SupplierDep, session: SessionDep
+) -> dict:
+    """Разорвать интеграцию: удалить связь товара с площадкой.
+
+    Доступно ТОЛЬКО для заблокированных товаров — сначала блокировка (остаток на
+    площадке форсится в 0), потом разрыв. Так карточка на маркетплейсе не остаётся с
+    остатком, которым мы больше не управляем. Саму карточку на площадке не трогаем —
+    только перестаём ей управлять; товар остаётся заблокированным.
+    """
+    # Только заблокированные товары этого поставщика из переданных.
+    blocked_ids = list(
+        (
+            await session.execute(
+                select(Product.id).where(
+                    Product.supplier_id == supplier.id,
+                    Product.id.in_(payload.product_ids),
+                    Product.sync_blocked.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not blocked_ids:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Разорвать интеграцию можно только у заблокированных товаров — сначала заблокируйте.",
+        )
+
+    result = await session.execute(
+        delete(ProductLink).where(
+            ProductLink.supplier_id == supplier.id,
+            ProductLink.product_id.in_(blocked_ids),
+            ProductLink.platform == payload.platform,
+        )
+    )
+
+    # Пересчёт сводного статуса интеграции у затронутых товаров: активна, если осталась
+    # хоть одна активная связь; иначе pending/error по оставшимся; нет связей → none.
+    remaining: dict[int, list[str]] = {}
+    for pid, st in (
+        await session.execute(
+            select(ProductLink.product_id, ProductLink.status).where(
+                ProductLink.product_id.in_(blocked_ids)
+            )
+        )
+    ).all():
+        remaining.setdefault(pid, []).append(st)
+
+    for pid in blocked_ids:
+        statuses = remaining.get(pid, [])
+        if not statuses:
+            new_status = IntegrationStatus.NONE
+        elif IntegrationStatus.ACTIVE in statuses:
+            new_status = IntegrationStatus.ACTIVE
+        elif IntegrationStatus.PENDING in statuses:
+            new_status = IntegrationStatus.PENDING
+        else:
+            new_status = statuses[0]
+        # sync_blocked НЕ трогаем — товар остаётся заблокированным после разрыва.
+        await session.execute(
+            update(Product).where(Product.id == pid).values(integration_status=new_status)
+        )
+
+    await session.commit()
+    return {"unlinked": result.rowcount or 0, "platform": payload.platform}
 
 
 @router.get("/facets", response_model=ProductFacets)

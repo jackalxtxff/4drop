@@ -186,6 +186,13 @@ class BlockRequest(BaseModel):
     blocked: bool
 
 
+class UnlinkRequest(BaseModel):
+    """Разрыв интеграции: удалить связь с площадкой у заблокированных товаров."""
+
+    product_ids: list[int] = Field(min_length=1)
+    platform: Literal["wb", "ozon"]
+
+
 class SyncSettingsIn(BaseModel):
     """Интервал 0 = задача выключена."""
 

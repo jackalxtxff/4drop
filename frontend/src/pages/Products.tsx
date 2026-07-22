@@ -271,6 +271,17 @@ export function ProductsPage() {
 
   const allLoadedSelected = items.length > 0 && items.every((i) => selected.has(i.id));
 
+  // Разрыв интеграции доступен только у заблокированных товаров. Среди выделенных
+  // заблокированных собираем площадки, на которых есть связь — для этих показываем
+  // кнопку «Разорвать».
+  const unlinkPlatforms = new Set<string>();
+  for (const p of items) {
+    if (!selected.has(p.id) || !p.sync_blocked) continue;
+    for (const link of p.integrations) {
+      if (link.status !== "none") unlinkPlatforms.add(link.platform);
+    }
+  }
+
   const syncCatalog = async () => {
     if (!supplierId) return;
     setError(null);
@@ -312,6 +323,22 @@ export function ProductsPage() {
       await fetchPage(1, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось изменить блокировку");
+    }
+  };
+
+  const unlink = async (platform: string) => {
+    if (!supplierId || selected.size === 0) return;
+    setError(null);
+    try {
+      await api.post(`/suppliers/${supplierId}/products/unlink`, {
+        product_ids: [...selected],
+        platform,
+      });
+      // Выделение не сбрасываем: товар остаётся заблокированным, а кнопка «Разорвать»
+      // для этой площадки исчезнет сама после пересчёта (связи больше нет).
+      await fetchPage(1, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось разорвать интеграцию");
     }
   };
 
@@ -614,6 +641,26 @@ export function ProductsPage() {
             >
               Разблокировать
             </button>
+
+            {/* Разрыв интеграции: доступен только когда среди выделенных есть
+                заблокированные интегрированные товары. Кнопка на каждую задействованную
+                площадку. Товар остаётся заблокированным. */}
+            {unlinkPlatforms.size > 0 && (
+              <>
+                <span className="mx-1 h-5 w-px bg-slate-200 dark:bg-slate-700" />
+                <span className="text-sm text-slate-500 dark:text-slate-400">Разорвать:</span>
+                {[...unlinkPlatforms].map((pf) => (
+                  <button
+                    key={pf}
+                    onClick={() => void unlink(pf)}
+                    title={`Удалить связь с ${PLATFORM_BADGE[pf]?.label ?? pf}. Карточка на площадке останется, товар — заблокированным.`}
+                    className="rounded-md border border-red-300 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                  >
+                    {PLATFORM_BADGE[pf]?.label ?? pf}
+                  </button>
+                ))}
+              </>
+            )}
           </div>
         )}
       </div>

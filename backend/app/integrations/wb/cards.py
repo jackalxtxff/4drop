@@ -34,8 +34,16 @@ CHAR_SPEED = 15001207      # Индекс скорости
 CHAR_LOAD = 15001208       # Индекс нагрузки (число)
 CHAR_PURPOSE = 15001209    # Назначение шин
 CHAR_NOISE = 15002678      # Шумность шины (число, дБ)
-CHAR_BRAND = 14177446      # Бренд
 CHAR_VENDOR_CODE = 5522881  # Артикул производителя
+CHAR_TNVED = 15000001      # ТНВЭД (строка; коды берутся из /content/v2/directory/tnved)
+
+# Числовые характеристики (charcType=4 в Content API): значение уходит ГОЛЫМ числом,
+# без обёртки в массив — иначе WB отвечает «Неправильный тип значения». Проверено на
+# боевом кабинете через GET /content/v2/object/charcs/5283. Остальные (charcType=1) —
+# строки в массиве. Бренд НЕ шлём характеристикой (14177446): как значение
+# бренд-характеристики WB валидирует его по справочнику и отвечает «бренда нет на WB,
+# добавьте новый»; бренд задаётся только верхнеуровневым полем variants[].brand.
+NUMERIC_CHARS = frozenset({CHAR_LOAD, CHAR_NOISE})
 
 SEASON_LABEL = {"s": "Летняя", "w": "Зимняя", "u": "Всесезонная"}
 
@@ -66,14 +74,32 @@ def vendor_code(product: Product) -> str:
     return f"{VENDOR_PREFIX}{product.cae}"
 
 
+def resolve_wb_brand(
+    brand: str | None,
+    registry: dict[str, str] | None,
+    manual_map: dict[str, str] | None = None,
+) -> str | None:
+    """Бренд каталога → каноничное написание бренда в реестре WB, или None если бренда
+    в реестре категории нет.
+
+    WB принимает бренд только в точном виде из своего реестра (GET /api/content/v1/brands),
+    причём регистр у брендов разный: HANKOOK, но Yokohama, Kama, MICHELIN — угадывать
+    нельзя. Поэтому сопоставляем без регистра с реальным реестром категории.
+    manual_map — ручной override (высший приоритет) для случаев, когда имя бренда в
+    4tochki не совпадает с WB (напр. «Galaxy (Yokohama ATG)»). None на выходе означает
+    «бренда нет в реестре» — карточку не собираем, сообщаем понятную причину.
+    """
+    if not brand:
+        return None
+    key = brand.strip().lower()
+    if manual_map and key in manual_map:
+        return manual_map[key]
+    return (registry or {}).get(key)
+
+
 def is_ours(vendor_code_value: str | None) -> bool:
     """Наша ли это карточка — по префиксу vendorCode. Защита от правки чужих товаров."""
     return bool(vendor_code_value) and vendor_code_value.startswith(VENDOR_PREFIX)
-
-
-def barcode_for(product: Product) -> str:
-    """Штрихкод детерминированный: повторный запуск не наплодит дублей карточек."""
-    return f"4D{product.cae}"
 
 
 def _package_dims(product: Product) -> dict:
@@ -112,7 +138,11 @@ def _characteristics(product: Product) -> list[dict]:
     def add(char_id: int, value) -> None:
         if value in (None, "", []):
             return
-        chars.append({"id": char_id, "value": value if isinstance(value, list) else [value]})
+        if char_id in NUMERIC_CHARS:
+            # charcType=4: голое число, без массива.
+            chars.append({"id": char_id, "value": value})
+        else:
+            chars.append({"id": char_id, "value": value if isinstance(value, list) else [value]})
 
     if product.width:
         add(CHAR_WIDTH, str(int(product.width)))
@@ -124,9 +154,12 @@ def _characteristics(product: Product) -> list[dict]:
     add(CHAR_SEASON, SEASON_LABEL.get(product.season or ""))
     add(CHAR_THORN, "Да" if product.thorn else "Нет")
     add(CHAR_SPEED, a.get("speed_index"))
-    add(CHAR_BRAND, product.brand)
+    # Бренд — только верхнеуровневым полем variants[].brand, не характеристикой.
     add(CHAR_VENDOR_CODE, product.cae)
     add(CHAR_PURPOSE, PURPOSE_LABEL.get(product.tyre_type or ""))
+    # ТНВЭД: 4tochki отдаёт код, WB держит его характеристикой (строкой). Для шин
+    # это код с обязательной маркировкой «Честный знак» (isKiz), но сам код WB принимает.
+    add(CHAR_TNVED, str(product.tn_ved) if product.tn_ved else None)
 
     # Индекс нагрузки у WB числовой, а 4tochki отдают «107/105» — берём первый.
     load = str(a.get("load_index") or "").split("/")[0].strip()
@@ -144,10 +177,15 @@ def _characteristics(product: Product) -> list[dict]:
     return chars
 
 
-def build_card(product: Product, price: Decimal) -> dict:
+def build_card(product: Product, price: Decimal, barcode: str, wb_brand: str) -> dict:
     """Карточка для POST /content/v2/cards/upload.
 
     price — цена продажи с уже применённой наценкой, в рублях.
+    barcode — штрихкод (EAN), сгенерированный средствами WB (/content/v2/barcodes).
+    Генерировать штрихкод вручную нельзя: WB требует свой валидный EAN, иначе остатки
+    по нему потом не примутся.
+    wb_brand — бренд в написании реестра WB (см. resolve_wb_brand). Идёт в поле brand;
+    производитель (product.brand) при этом остаётся в названии и описании.
     """
     subject_id = SUBJECT_BY_TYPE.get(product.goods_type)
     if subject_id is None:
@@ -155,7 +193,7 @@ def build_card(product: Product, price: Decimal) -> dict:
             f"Тип товара «{product.goods_type}» не поддерживается: карточки создаются "
             "только для шин и дисков."
         )
-    if not product.brand:
+    if not wb_brand:
         raise CardBuildError("У товара не указан бренд — WB не примет карточку.")
     if price is None or price <= 0:
         raise CardBuildError("Нет цены поставщика — продавать нечего.")
@@ -189,7 +227,7 @@ def build_card(product: Product, price: Decimal) -> dict:
                 # уйдёт в ошибку модерации целиком.
                 "title": (product.name or f"{product.brand} {size}")[:60],
                 "description": description[:2000],
-                "brand": product.brand,
+                "brand": wb_brand,
                 "dimensions": _package_dims(product),
                 "characteristics": _characteristics(product),
                 "sizes": [
@@ -197,7 +235,7 @@ def build_card(product: Product, price: Decimal) -> dict:
                         "techSize": "0",
                         "wbSize": "",
                         "price": int(price),
-                        "skus": [barcode_for(product)],
+                        "skus": [barcode],
                     }
                 ],
             }
@@ -212,7 +250,9 @@ def card_content_hash(product: Product) -> str:
     любое изменение цены гнало бы карточку на повторную модерацию. Считаем от того
     же, что уходит в build_card, но с обнулённой ценой и выкинутым блоком sizes.
     """
-    card = build_card(product, Decimal("1"))
+    # Штрихкод в хэш не входит (блок sizes удаляем). Бренд для хэша берём исходный
+    # (детерминированно): смена карты брендов не должна гнать все карточки на переобновление.
+    card = build_card(product, Decimal("1"), "", product.brand or "")
     for variant in card.get("variants", []):
         variant.pop("sizes", None)
     payload = json.dumps(card, sort_keys=True, ensure_ascii=False)

@@ -215,6 +215,79 @@ class WBClient:
 
         return updated, errors
 
+    async def list_brands(self, subject_id: int) -> dict[str, str]:
+        """Реестр брендов категории: {имя_в_нижнем_регистре: каноничное имя WB}.
+
+        GET /api/content/v1/brands?subjectId=… — весь список одним запросом (у WB нет
+        серверного фильтра по имени). Нужен, чтобы подставить бренд в точном написании
+        реестра: WB принимает бренд только так (напр. «HANKOOK», «Yokohama», «Kama» —
+        регистр у брендов разный, угадывать нельзя), иначе «бренда нет на WB».
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            resp = await http.get(
+                f"{self._content}/api/content/v1/brands",
+                headers=self._headers,
+                params={"subjectId": subject_id},
+            )
+        if resp.status_code != 200:
+            raise WBError(f"Реестр брендов WB: HTTP {resp.status_code} — {_detail(resp)}")
+        brands = resp.json().get("brands") or []
+        return {b["name"].strip().lower(): b["name"] for b in brands if b.get("name")}
+
+    async def generate_barcodes(self, count: int) -> list[str]:
+        """POST /content/v2/barcodes — сгенерировать `count` штрихкодов (EAN) силами WB.
+
+        WB требует свои валидные штрихкоды: карточку примут с любым vendorCode, но
+        остатки по «самодельному» штрихкоду потом не пройдут. Поэтому штрихкоды берём
+        отсюда, а не генерируем вручную.
+        """
+        if count <= 0:
+            return []
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            resp = await http.post(
+                f"{self._content}/content/v2/barcodes",
+                headers=self._headers,
+                json={"count": count},
+            )
+        if resp.status_code != 200:
+            raise WBError(f"Генерация штрихкодов: HTTP {resp.status_code} — {_detail(resp)}")
+        data = resp.json().get("data") or []
+        if len(data) < count:
+            raise WBError(f"WB вернул {len(data)} штрихкодов из запрошенных {count}")
+        return list(data)
+
+    async def upload_photo(
+        self, nm_id: int, image: bytes, filename: str = "0.jpg"
+    ) -> str | None:
+        """POST /content/v3/media/file — прикрепить фото к карточке по nmID (бинарно).
+
+        Грузим именно байтами, а не URL через /media/save: источник (4tochki) отдаёт
+        картинку только браузерному User-Agent, и WB по ссылке её не скачает. Возвращает
+        None при успехе, иначе текст ошибки.
+        """
+        # Для multipart Content-Type ставит httpx (с boundary) — свой JSON-заголовок
+        # сюда передавать нельзя, поэтому собираем заголовки вручную.
+        headers = {
+            "Authorization": self._headers["Authorization"],
+            "X-Nm-Id": str(nm_id),
+            "X-Photo-Number": "1",
+        }
+        files = {"uploadfile": (filename, image, "image/jpeg")}
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            try:
+                resp = await http.post(
+                    f"{self._content}/content/v3/media/file", headers=headers, files=files
+                )
+            except httpx.HTTPError as exc:
+                return exc.__class__.__name__
+        if resp.status_code == 200:
+            try:
+                if not resp.json().get("error"):
+                    return None
+            except ValueError:
+                return None
+        return _detail(resp)
+
     async def cards_map(self) -> dict[str, dict]:
         """vendorCode → {nm_id, chrt_id, barcode} по всем карточкам кабинета.
 

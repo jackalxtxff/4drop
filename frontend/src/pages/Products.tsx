@@ -282,6 +282,17 @@ export function ProductsPage() {
     }
   }
 
+  // Если ВСЕ выделенные товары уже интегрированы на WB (активны/на модерации), кнопки
+  // «Wildberries» и «Обе площадки» прячем — на WB интегрировать нечего.
+  const selectedLoaded = items.filter((p) => selected.has(p.id));
+  const allSelectedOnWb =
+    selectedLoaded.length > 0 &&
+    selectedLoaded.every((p) =>
+      p.integrations.some(
+        (l) => l.platform === "wb" && (l.status === "active" || l.status === "pending"),
+      ),
+    );
+
   const syncCatalog = async () => {
     if (!supplierId) return;
     setError(null);
@@ -607,24 +618,28 @@ export function ProductsPage() {
         {selected.size > 0 && (
           <div className="flex items-center gap-2">
             <span className="text-sm text-slate-500 dark:text-slate-400">Интегрировать в:</span>
-            <button
-              onClick={() => setConfirm(["wb"])}
-              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
-            >
-              Wildberries
-            </button>
+            {!allSelectedOnWb && (
+              <button
+                onClick={() => setConfirm(["wb"])}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+              >
+                Wildberries
+              </button>
+            )}
             <button
               onClick={() => setConfirm(["ozon"])}
               className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
             >
               Ozon
             </button>
-            <button
-              onClick={() => setConfirm(["wb", "ozon"])}
-              className="rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white dark:bg-slate-100 dark:text-slate-900"
-            >
-              Обе площадки
-            </button>
+            {!allSelectedOnWb && (
+              <button
+                onClick={() => setConfirm(["wb", "ozon"])}
+                className="rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white dark:bg-slate-100 dark:text-slate-900"
+              >
+                Обе площадки
+              </button>
+            )}
 
             <span className="mx-1 h-5 w-px bg-slate-200 dark:bg-slate-700" />
 

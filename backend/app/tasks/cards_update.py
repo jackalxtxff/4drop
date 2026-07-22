@@ -25,11 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import SessionLocal
 from app.formula import FormulaError, compile_formula, evaluate
 from app.integrations.wb.cards import (
+    SUBJECT_BY_TYPE,
     CardBuildError,
     build_card,
     card_content_hash,
+    resolve_wb_brand,
 )
-from app.integrations.wb.client import WBClient
+from app.integrations.wb.client import WBClient, WBError
 from app.models import (
     Credential,
     IntegrationStatus,
@@ -58,6 +60,7 @@ async def _update_wb_cards(
         return "error", "Доступы к Wildberries не заданы"
 
     api_key = json.loads(decrypt_secret(cred.secrets_encrypted))["api_key"]
+    brand_map = (cred.settings or {}).get("wb_brand_map") or {}
     settings = await get_or_create_settings(session, supplier_id)
     try:
         price_formula = compile_formula(settings.wb_price_formula)
@@ -84,6 +87,18 @@ async def _update_wb_cards(
 
     job.total = len(rows)
 
+    client = WBClient(api_key)
+
+    # Реестры брендов категорий — чтобы бренд ушёл в точном написании WB.
+    subjects = {SUBJECT_BY_TYPE.get(p.goods_type) for _l, p in rows}
+    subjects.discard(None)
+    brand_registry: dict[int, dict[str, str]] = {}
+    try:
+        for sid in subjects:
+            brand_registry[sid] = await client.list_brands(sid)
+    except WBError as exc:
+        return "error", f"Не удалось получить реестр брендов WB: {exc}"
+
     changed_cards: list[dict] = []
     changed_links: list[tuple[ProductLink, Product, str]] = []
     build_errors = 0
@@ -98,8 +113,11 @@ async def _update_wb_cards(
             if product.min_price
             else None
         )
+        subject_id = SUBJECT_BY_TYPE.get(product.goods_type)
+        wb_brand = resolve_wb_brand(product.brand, brand_registry.get(subject_id), brand_map)
         try:
-            card = build_card(product, price)
+            # Обновление идёт по существующему штрихкоду связи (WB не выдаёт новый).
+            card = build_card(product, price, link.barcode or "", wb_brand)
         except CardBuildError:
             build_errors += 1
             continue
@@ -112,7 +130,6 @@ async def _update_wb_cards(
     if not changed_cards:
         return "info", f"Атрибуты не изменились — обновлять нечего (карточек: {len(rows)})"
 
-    client = WBClient(api_key)
     sent, errors = await client.update_cards(changed_cards)
 
     # upload_cards принимает всю пачку целиком (или падает), поэтому при успехе

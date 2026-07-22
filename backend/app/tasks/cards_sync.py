@@ -18,20 +18,22 @@ import json
 import logging
 from datetime import UTC, datetime
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import SessionLocal
 from app.formula import FormulaError, compile_formula, evaluate
 from app.integrations.wb.cards import (
+    SUBJECT_BY_TYPE,
     CardBuildError,
-    barcode_for,
     build_card,
     card_content_hash,
     is_ours,
+    resolve_wb_brand,
     vendor_code,
 )
-from app.integrations.wb.client import WBClient
+from app.integrations.wb.client import WBClient, WBError
 from app.models import (
     Credential,
     IntegrationStatus,
@@ -73,6 +75,37 @@ async def _link(
     return link
 
 
+# 4tochki отдаёт картинки только браузерному User-Agent (иначе 502), поэтому качаем
+# с этим заголовком, а в WB грузим уже байтами.
+_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+
+async def _fetch_image(url: str | None) -> bytes | None:
+    if not url:
+        return None
+    try:
+        async with httpx.AsyncClient(
+            timeout=30, follow_redirects=True, headers={"User-Agent": _BROWSER_UA}
+        ) as http:
+            resp = await http.get(url)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+        return resp.content
+    return None
+
+
+def _reusable_barcode(link: ProductLink | None) -> str | None:
+    """Штрихкод связи, годный к переиспользованию — только настоящий EAN (цифры).
+
+    Старые карточки могли получить самодельный штрихкод вида «4D<cae>» (до перехода на
+    штрихкоды WB). Такой переиспользовать нельзя — по нему WB не примет остатки; для
+    таких генерируем новый EAN средствами WB.
+    """
+    bc = link.barcode if link else None
+    return bc if (bc and bc.isdigit()) else None
+
+
 async def _wb_credential(session: AsyncSession, supplier_id: int) -> Credential | None:
     return (
         await session.execute(
@@ -91,10 +124,12 @@ async def create_wb_cards(
     api_key: str,
     settings: SyncSettings,
     job: SyncJob,
+    brand_map: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Ядро создания карточек WB. Возвращает (level, message).
 
     Заблокированные товары сюда попадать не должны — их отсекают вызывающие.
+    brand_map — соответствие бренд каталога → бренд в реестре WB (см. resolve_wb_brand).
     """
     try:
         price_formula = compile_formula(settings.wb_price_formula)
@@ -103,18 +138,67 @@ async def create_wb_cards(
 
     client = WBClient(api_key)
 
+    # Штрихкоды генерирует WB (вручную нельзя — иначе остатки по ним не пройдут).
+    # Повторный прогон переиспользует уже выданный штрихкод из связи, чтобы WB не
+    # создал дубль карточки; новые генерируем одним запросом на всю пачку.
+    existing_links = {
+        l.product_id: l
+        for l in (
+            await session.execute(
+                select(ProductLink).where(
+                    ProductLink.product_id.in_([p.id for p in products]),
+                    ProductLink.platform == Platform.WB,
+                )
+            )
+        ).scalars()
+    }
+    need_count = sum(
+        1 for p in products if not _reusable_barcode(existing_links.get(p.id))
+    )
+    try:
+        fresh = iter(await client.generate_barcodes(need_count))
+    except WBError as exc:
+        return "error", f"Не удалось получить штрихкоды WB: {exc}"
+
+    # Реестры брендов по категориям (шины/диски) — один запрос на категорию. Нужны,
+    # чтобы подставить бренд в точном написании WB (иначе «бренда нет на WB»).
+    subjects = {SUBJECT_BY_TYPE.get(p.goods_type) for p in products}
+    subjects.discard(None)
+    brand_registry: dict[int, dict[str, str]] = {}
+    try:
+        for sid in subjects:
+            brand_registry[sid] = await client.list_brands(sid)
+    except WBError as exc:
+        return "error", f"Не удалось получить реестр брендов WB: {exc}"
+
     cards: list[dict] = []
     by_vendor: dict[str, Product] = {}
+    barcode_by_product: dict[int, str] = {}
     skipped = 0
 
     for product in products:
+        barcode = _reusable_barcode(existing_links.get(product.id)) or next(fresh)
         price = (
             evaluate(price_formula, product.min_price, product.price_rozn, product.weight)
             if product.min_price
             else None
         )
+
+        subject_id = SUBJECT_BY_TYPE.get(product.goods_type)
+        wb_brand = resolve_wb_brand(product.brand, brand_registry.get(subject_id), brand_map)
+        if subject_id and product.brand and not wb_brand:
+            link = await _link(session, supplier_id, product.id, Platform.WB)
+            link.status = IntegrationStatus.ERROR
+            link.status_message = (
+                f"Бренд «{product.brand}» не найден в реестре WB для этой категории — "
+                "добавьте бренд в кабинете WB или задайте соответствие."
+            )
+            product.integration_status = IntegrationStatus.ERROR
+            skipped += 1
+            continue
+
         try:
-            cards.append(build_card(product, price))
+            cards.append(build_card(product, price, barcode, wb_brand))
         except CardBuildError as exc:
             link = await _link(session, supplier_id, product.id, Platform.WB)
             link.status = IntegrationStatus.ERROR
@@ -123,6 +207,7 @@ async def create_wb_cards(
             skipped += 1
             continue
         by_vendor[vendor_code(product)] = product
+        barcode_by_product[product.id] = barcode
 
     await session.commit()
 
@@ -135,7 +220,7 @@ async def create_wb_cards(
         link = await _link(session, supplier_id, product.id, Platform.WB)
         link.status = IntegrationStatus.PENDING
         link.status_message = "Отправлено на модерацию WB"
-        link.barcode = barcode_for(product)
+        link.barcode = barcode_by_product[product.id]
         product.integration_status = IntegrationStatus.PENDING
     job.processed = sent
     await session.commit()
@@ -166,6 +251,12 @@ async def create_wb_cards(
             link.card_hash = card_content_hash(product)
             product.integration_status = IntegrationStatus.ACTIVE
             ok += 1
+            # Фото: скачиваем у 4tochki (браузерный UA) и грузим байтами в WB. Прикрепить
+            # можно только когда у карточки уже есть nmID. Ошибку фото не превращаем в
+            # ошибку карточки — карточка уже создана.
+            img = await _fetch_image(product.img_big or product.img_small)
+            if img:
+                await client.upload_photo(link.nm_id, img)
         else:
             link.status = IntegrationStatus.PENDING
             link.status_message = "Ожидает обработки на стороне WB"
@@ -250,7 +341,8 @@ async def create_cards(ctx: dict, supplier_id: int, job_id: int) -> None:
 
         try:
             level, message = await create_wb_cards(
-                session, supplier_id, products, api_key, settings, job
+                session, supplier_id, products, api_key, settings, job,
+                brand_map=(cred.settings or {}).get("wb_brand_map") or {},
             )
             if blocked:
                 message += f". Заблокировано, пропущено: {blocked}"

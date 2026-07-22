@@ -114,7 +114,8 @@ async def auto_cards(ctx: dict, supplier_id: int, job_id: int) -> None:
 
         try:
             level, message = await create_wb_cards(
-                session, supplier_id, products, api_key, settings, job
+                session, supplier_id, products, api_key, settings, job,
+                brand_map=(cred.settings or {}).get("wb_brand_map") or {},
             )
             message = f"Авто-создание. {message}"
             job.status = "done" if level == "info" else "failed"

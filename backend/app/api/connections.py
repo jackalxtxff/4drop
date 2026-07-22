@@ -18,7 +18,6 @@ from app.models import (
 )
 from app.schemas import (
     CredentialOut,
-    FbsToggleIn,
     FbsWarehouseOut,
     FourTochkiCredentialIn,
     OzonCredentialIn,
@@ -441,6 +440,14 @@ async def set_warehouse_mappings(
     cached = (cred.settings or {}).get("fbs_warehouses") if cred else None
     name_by_id = {w["id"]: w.get("name") for w in (cached or [])}
 
+    # Состояние вкл/выкл FBS-складов сохраняется здесь же, вместе с привязками (по одной
+    # кнопке «Сохранить»), а не по каждому переключению тумблера.
+    if cred is not None:
+        cred.settings = {
+            **(cred.settings or {}),
+            "fbs_disabled": sorted(set(payload.disabled_fbs)),
+        }
+
     await session.execute(
         delete(WarehouseMapping).where(
             WarehouseMapping.supplier_id == supplier.id,
@@ -459,39 +466,9 @@ async def set_warehouse_mappings(
             )
         )
     await session.commit()
-    return await get_warehouse_mappings(supplier, session)
 
-
-@router.put("/warehouse-mappings/{platform}/fbs/{fbs_id}/enabled", response_model=WarehouseMappingsView)
-async def set_fbs_enabled(
-    platform: str,
-    fbs_id: str,
-    payload: FbsToggleIn,
-    supplier: SupplierDep,
-    session: SessionDep,
-) -> WarehouseMappingsView:
-    """Включить/выключить FBS-склад. Состояние храним в settings['fbs_disabled'].
-
-    При выключении остаток на складе нужно обнулить — ставим задачу пуша: она зальёт
-    на выключенный склад нули (см. push_wb). Так пользователю не нужно отдельно жать
-    «отправить остатки», а логика обнуления живёт в одном месте.
-    """
-    if platform not in MP_PLATFORMS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неизвестная площадка")
-    cred = await _platform_cred(session, supplier.id, platform)
-    if cred is None or not cred.secrets_encrypted:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Доступы к площадке не заданы")
-
-    disabled = set((cred.settings or {}).get("fbs_disabled") or [])
-    if payload.enabled:
-        disabled.discard(fbs_id)
-    else:
-        disabled.add(fbs_id)
-    cred.settings = {**(cred.settings or {}), "fbs_disabled": sorted(disabled)}
-    await session.commit()
-
-    if not payload.enabled:
-        # Обнулить остаток на выключенном складе — через обычный пуш.
-        await enqueue_kind(session, supplier.id, "push")
+    # Пуш остатков: учтёт новые привязки и вкл/выкл (выключенным FBS зальёт 0). Так
+    # пользователю не нужно отдельно жать «отправить остатки».
+    await enqueue_kind(session, supplier.id, "push")
 
     return await get_warehouse_mappings(supplier, session)

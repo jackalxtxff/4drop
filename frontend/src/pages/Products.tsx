@@ -44,6 +44,7 @@ const LINK_STATUS_LABEL: Record<string, string> = {
 };
 
 const INTEGRATION_FILTER_OPTIONS = [
+  { value: "any", label: "Любая (ВБ или Озон)" },
   { value: "wb", label: "На Wildberries" },
   { value: "ozon", label: "На Ozon" },
   { value: "none", label: "Не интегрирован" },
@@ -89,6 +90,7 @@ interface Filters {
   diameter: string[];
   integration: string[];
   inStock: boolean;
+  blocked: boolean;
   priceMin: string;
   priceMax: string;
 }
@@ -105,6 +107,7 @@ const EMPTY: Filters = {
   diameter: [],
   integration: [],
   inStock: false,
+  blocked: false,
   priceMin: "",
   priceMax: "",
 };
@@ -144,6 +147,7 @@ function buildQuery(f: Filters, sort: SortField, order: Order, page: number): st
     ["brand", "season", "tyre_type", "constr", "camera", "width", "height", "diameter", "integration"] as const
   ).forEach((key) => f[key].forEach((v) => p.append(key, v)));
   if (f.inStock) p.set("in_stock", "true");
+  if (f.blocked) p.set("blocked", "true");
   if (f.priceMin) p.set("price_min", f.priceMin);
   if (f.priceMax) p.set("price_max", f.priceMax);
   p.set("sort", sort);
@@ -293,6 +297,10 @@ export function ProductsPage() {
       ),
     );
 
+  // Если все выделенные товары уже заблокированы — блокировать нечего, кнопку прячем.
+  const allSelectedBlocked =
+    selectedLoaded.length > 0 && selectedLoaded.every((p) => p.sync_blocked);
+
   const syncCatalog = async () => {
     if (!supplierId) return;
     setError(null);
@@ -383,6 +391,7 @@ export function ProductsPage() {
     (["brand", "season", "tyre_type", "constr", "camera", "width", "height", "diameter", "integration"] as const)
       .reduce((n, k) => n + filters[k].length, 0) +
     (filters.inStock ? 1 : 0) +
+    (filters.blocked ? 1 : 0) +
     (filters.priceMin ? 1 : 0) +
     (filters.priceMax ? 1 : 0) +
     (filters.q ? 1 : 0);
@@ -531,7 +540,7 @@ export function ProductsPage() {
             INTEGRATION_FILTER_OPTIONS.find((o) => o.value === v)?.label ?? v
           }
           searchable={false}
-          placeholder="Любая"
+          placeholder="Все"
           className="w-44"
         />
 
@@ -563,6 +572,16 @@ export function ProductsPage() {
             className="accent-slate-900"
           />
           Только в наличии
+        </label>
+
+        <label className="flex items-center gap-2 pb-2 text-sm">
+          <input
+            type="checkbox"
+            checked={filters.blocked}
+            onChange={(e) => setFilters({ ...filters, blocked: e.target.checked })}
+            className="accent-slate-900"
+          />
+          Только заблокированные
         </label>
 
         {activeFilters > 0 && (
@@ -643,13 +662,15 @@ export function ProductsPage() {
 
             <span className="mx-1 h-5 w-px bg-slate-200 dark:bg-slate-700" />
 
-            <button
-              onClick={() => void toggleBlock(true)}
-              title="Заблокированные товары не синхронизируются с маркетплейсами"
-              className="rounded-md border border-amber-300 px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950"
-            >
-              Заблокировать
-            </button>
+            {!allSelectedBlocked && (
+              <button
+                onClick={() => void toggleBlock(true)}
+                title="Заблокированные товары не синхронизируются с маркетплейсами"
+                className="rounded-md border border-amber-300 px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950"
+              >
+                Заблокировать
+              </button>
+            )}
             <button
               onClick={() => void toggleBlock(false)}
               className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"

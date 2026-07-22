@@ -209,17 +209,23 @@ function PlatformBinding({
     for (const m of platform.mappings) a[m.fourtochki_wrh] = m.fbs_warehouse_id;
     return a;
   };
+  // Локально: выключенные FBS-склады. Состояние применяется только по «Сохранить».
+  const buildDisabled = () =>
+    new Set(platform.fbs_warehouses.filter((w) => !w.enabled).map((w) => w.id));
+
   const [assign, setAssign] = useState<Record<number, string>>(build);
+  const [disabledFbs, setDisabledFbs] = useState<Set<string>>(buildDisabled);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  // Извне пришли обновлённые привязки (после сохранения/перезагрузки) — пересобрать.
+  // Извне пришли обновлённые данные (после сохранения/перезагрузки) — пересобрать.
   useEffect(() => {
     setAssign(build());
+    setDisabledFbs(buildDisabled());
     setSaved(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform.mappings]);
+  }, [platform.mappings, platform.fbs_warehouses]);
 
   const toggle = (fbsId: string, wrh: number) => {
     setSaved(false);
@@ -227,6 +233,17 @@ function PlatformBinding({
       const next = { ...a };
       if (next[wrh] === fbsId) delete next[wrh];
       else next[wrh] = fbsId;
+      return next;
+    });
+  };
+
+  // Переключение вкл/выкл — только локально; сохранится по кнопке.
+  const toggleFbs = (fbsId: string) => {
+    setSaved(false);
+    setDisabledFbs((d) => {
+      const next = new Set(d);
+      if (next.has(fbsId)) next.delete(fbsId);
+      else next.add(fbsId);
       return next;
     });
   };
@@ -242,7 +259,7 @@ function PlatformBinding({
       }));
       await api.put(
         `/suppliers/${supplierId}/connections/warehouse-mappings/${platform.platform}`,
-        { mappings },
+        { mappings, disabled_fbs: [...disabledFbs] },
       );
       await onSaved();
       setSaved(true);
@@ -250,19 +267,6 @@ function PlatformBinding({
       setError(e instanceof Error ? e.message : "Не удалось сохранить привязки");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const toggleFbs = async (fbsId: string, enabled: boolean) => {
-    setError(null);
-    try {
-      await api.put(
-        `/suppliers/${supplierId}/connections/warehouse-mappings/${platform.platform}/fbs/${fbsId}/enabled`,
-        { enabled },
-      );
-      await onSaved();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Не удалось переключить склад");
     }
   };
 
@@ -307,8 +311,10 @@ function PlatformBinding({
           const boundStock = ftWarehouses
             .filter((w) => assign[w.id] === fbs.id)
             .reduce((s, w) => s + (w.total_rest ?? 0), 0);
+          // Вкл/выкл берём из локального состояния (применится по «Сохранить»).
+          const enabled = !disabledFbs.has(fbs.id);
           return (
-          <div key={fbs.id} className={fbs.enabled ? "" : "opacity-60"}>
+          <div key={fbs.id} className={enabled ? "" : "opacity-60"}>
             <div className="mb-2 flex items-center gap-2 text-sm font-medium">
               <span className="rounded bg-slate-100 px-2 py-0.5 text-xs dark:bg-slate-800">
                 FBS
@@ -317,7 +323,7 @@ function PlatformBinding({
               <span className="text-xs font-normal text-slate-400">#{fbs.id}</span>
               <span
                 className={`rounded px-1.5 py-0.5 text-xs font-normal ${
-                  fbs.enabled
+                  enabled
                     ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                     : "bg-slate-100 text-slate-500 line-through dark:bg-slate-800"
                 }`}
@@ -325,25 +331,25 @@ function PlatformBinding({
               >
                 остаток: {boundStock} шт
               </span>
-              {!fbs.enabled && (
+              {!enabled && (
                 <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs font-normal text-red-600 dark:bg-red-950 dark:text-red-300">
                   выключен · на площадку 0
                 </span>
               )}
-              {/* Тумблер вкл/выкл: у выключенного склада остаток обнуляется на площадке. */}
+              {/* Тумблер вкл/выкл — только локально; применится по «Сохранить». */}
               <button
                 type="button"
                 role="switch"
-                aria-checked={fbs.enabled}
-                onClick={() => void toggleFbs(fbs.id, !fbs.enabled)}
-                title={fbs.enabled ? "Выключить склад (остаток → 0)" : "Включить склад"}
+                aria-checked={enabled}
+                onClick={() => toggleFbs(fbs.id)}
+                title={enabled ? "Выключить склад (остаток → 0 после сохранения)" : "Включить склад"}
                 className={`relative ml-auto h-5 w-9 shrink-0 rounded-full transition ${
-                  fbs.enabled ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"
+                  enabled ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"
                 }`}
               >
                 <span
                   className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
-                    fbs.enabled ? "left-[18px]" : "left-0.5"
+                    enabled ? "left-[18px]" : "left-0.5"
                   }`}
                 />
               </button>
@@ -352,7 +358,7 @@ function PlatformBinding({
               {ftWarehouses.map((w) => {
                 const here = assign[w.id] === fbs.id;
                 const elsewhere = assign[w.id] != null && assign[w.id] !== fbs.id;
-                const locked = elsewhere || !fbs.enabled;
+                const locked = elsewhere || !enabled;
                 return (
                   <label
                     key={w.id}

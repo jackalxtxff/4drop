@@ -35,6 +35,7 @@ from app.models import (
 from app.formula import FormulaError, compile_formula, evaluate
 from app.security import decrypt_secret
 from app.stock import marketplace_stock
+from app.tasks.cards_sync import reconcile_wb_pending
 
 
 def _wh_stock_items(
@@ -83,6 +84,11 @@ async def push_wb(
         return "error", "Доступы к Wildberries не заданы"
 
     api_key = json.loads(decrypt_secret(cred.secrets_encrypted))["api_key"]
+
+    # Перед пушем дорезолвим pending-карточки: проставляем nmID и грузим фото. Иначе
+    # карточки, которым WB не присвоил nmID в 10-сек окно создания, навсегда остались бы
+    # без остатков (пуш берёт только active) и без фото.
+    await reconcile_wb_pending(session, supplier_id, api_key)
 
     settings = (
         await session.execute(

@@ -336,9 +336,14 @@ class WarehouseMappingItemIn(BaseModel):
 
 
 class WarehouseMappingsIn(BaseModel):
-    """Полный набор привязок для площадки — заменяет прежний целиком."""
+    """Полный набор привязок для площадки — заменяет прежний целиком.
+
+    disabled_fbs — id выключенных FBS-складов (на них публикуется остаток 0). Состояние
+    вкл/выкл сохраняется здесь же, по кнопке «Сохранить», а не по каждому переключению.
+    """
 
     mappings: list[WarehouseMappingItemIn] = []
+    disabled_fbs: list[str] = []
 
 
 class PlatformMappingView(BaseModel):

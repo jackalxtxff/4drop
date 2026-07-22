@@ -58,6 +58,7 @@ def _apply_filters(
     price_min: Decimal | None,
     price_max: Decimal | None,
     integration: list[str] | None,
+    blocked: bool | None,
 ) -> Select:
     """Вся фильтрация — на сервере: каталог в десятки тысяч позиций на клиент не выгрузить."""
     if q:
@@ -95,26 +96,32 @@ def _apply_filters(
     if price_max is not None:
         stmt = stmt.where(Product.min_price <= price_max)
     if integration:
-        # Фильтр по площадке, а не по общему статусу: «none» — нет ни одной активной
-        # карточки, «wb»/«ozon» — есть активная карточка на этой площадке.
-        # Значения объединяются по ИЛИ: «wb или ozon» = интегрирован хоть куда-то.
-        active_on = (
-            select(ProductLink.product_id)
-            .where(
-                ProductLink.product_id == Product.id,
-                ProductLink.status == IntegrationStatus.ACTIVE,
-            )
+        # «Интегрирован» = есть карточка активная ИЛИ в обработке (на модерации WB),
+        # чтобы только что отправленные товары не выпадали из фильтра.
+        #   any        — интегрирован хоть куда-то (wb или ozon);
+        #   wb / ozon  — есть карточка на этой площадке;
+        #   none       — нет ни одной (не интегрирован).
+        # Несколько значений объединяются по ИЛИ.
+        integrated_on = select(ProductLink.product_id).where(
+            ProductLink.product_id == Product.id,
+            ProductLink.status.in_(
+                (IntegrationStatus.ACTIVE, IntegrationStatus.PENDING)
+            ),
         )
         conditions = []
         if "none" in integration:
-            conditions.append(~active_on.exists())
+            conditions.append(~integrated_on.exists())
+        if "any" in integration:
+            conditions.append(integrated_on.exists())
         for platform in ("wb", "ozon"):
             if platform in integration:
                 conditions.append(
-                    active_on.where(ProductLink.platform == platform).exists()
+                    integrated_on.where(ProductLink.platform == platform).exists()
                 )
         if conditions:
             stmt = stmt.where(or_(*conditions))
+    if blocked:
+        stmt = stmt.where(Product.sync_blocked.is_(True))
     return stmt
 
 
@@ -136,6 +143,7 @@ async def list_products(
     price_min: Annotated[Decimal | None, Query()] = None,
     price_max: Annotated[Decimal | None, Query()] = None,
     integration: Annotated[list[str] | None, Query()] = None,
+    blocked: Annotated[bool | None, Query()] = None,
     sort: Annotated[SortField, Query()] = "cae",
     order: Annotated[Literal["asc", "desc"], Query()] = "asc",
     page: Annotated[int, Query(ge=1)] = 1,
@@ -156,6 +164,7 @@ async def list_products(
         price_min=price_min,
         price_max=price_max,
         integration=integration,
+        blocked=blocked,
     )
 
     buffer = await session.scalar(

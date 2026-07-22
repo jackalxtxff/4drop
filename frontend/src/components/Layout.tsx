@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 
 import { api, auth, type Supplier } from "../api";
+import { JobToaster } from "./JobToaster";
 import { SupplierDialog } from "./SupplierDialog";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -75,6 +76,7 @@ export function Layout() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <JobToaster supplierId={currentId ?? undefined} />
       <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="mx-auto flex max-w-[1600px] items-center gap-6 px-6 py-3">
           <span className="font-semibold tracking-tight">4drop</span>

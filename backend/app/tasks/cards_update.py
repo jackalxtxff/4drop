@@ -124,6 +124,12 @@ async def _update_wb_cards(
         # Обновление идёт по nmID: WB правит существующую карточку, а не создаёт новую.
         variant = card["variants"][0]
         variant["nmID"] = link.nm_id
+        # Указываем chrtID существующего размера: без него WB считает штрихкод из sizes
+        # НОВЫМ и отклоняет карточку как «неуникальный баркод» (он уже на этой карточке).
+        # Заодно это чинило проваленную модерацию, из-за которой не применялся kizMarked.
+        if link.chrt_id:
+            for size in variant.get("sizes", []):
+                size["chrtID"] = link.chrt_id
         changed_cards.append(variant)
         changed_links.append((link, product, new_hash))
 

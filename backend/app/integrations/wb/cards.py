@@ -218,29 +218,35 @@ def build_card(product: Product, price: Decimal, barcode: str, wb_brand: str) ->
         if part
     )
 
-    return {
-        "subjectID": subject_id,
-        "variants": [
+    variant = {
+        "vendorCode": vendor_code(product),
+        # WB режет заголовок по 60 символов — обрезаем сами, иначе карточка
+        # уйдёт в ошибку модерации целиком.
+        "title": (product.name or f"{product.brand} {size}")[:60],
+        "description": description[:2000],
+        "brand": wb_brand,
+        "dimensions": _package_dims(product),
+        "characteristics": _characteristics(product),
+        "sizes": [
             {
-                "vendorCode": vendor_code(product),
-                # WB режет заголовок по 60 символов — обрезаем сами, иначе карточка
-                # уйдёт в ошибку модерации целиком.
-                "title": (product.name or f"{product.brand} {size}")[:60],
-                "description": description[:2000],
-                "brand": wb_brand,
-                "dimensions": _package_dims(product),
-                "characteristics": _characteristics(product),
-                "sizes": [
-                    {
-                        "techSize": "0",
-                        "wbSize": "",
-                        "price": int(price),
-                        "skus": [barcode],
-                    }
-                ],
+                "techSize": "0",
+                "wbSize": "",
+                "price": int(price),
+                "skus": [barcode],
             }
         ],
     }
+    card = {"subjectID": subject_id, "variants": [variant]}
+
+    # 289-ФЗ: подтверждаем, что товар маркирован средствами идентификации («Честный
+    # знак»). Без флага WB со временем блокирует карточку. Шины подлежат обязательной
+    # маркировке; диски — нет, поэтому ставим только шинам. Кладём и на уровень карточки
+    # (для /cards/upload), и в вариант (для /cards/update, который шлёт вариант).
+    if product.goods_type == "tyre":
+        card["kizMarked"] = True
+        variant["kizMarked"] = True
+
+    return card
 
 
 def card_content_hash(product: Product) -> str:
@@ -253,7 +259,11 @@ def card_content_hash(product: Product) -> str:
     # Штрихкод в хэш не входит (блок sizes удаляем). Бренд для хэша берём исходный
     # (детерминированно): смена карты брендов не должна гнать все карточки на переобновление.
     card = build_card(product, Decimal("1"), "", product.brand or "")
+    # kizMarked применяется только при создании (update его не пишет), поэтому из хэша
+    # исключаем — иначе он вызвал бы бессмысленную перемодерацию всех старых карточек.
+    card.pop("kizMarked", None)
     for variant in card.get("variants", []):
         variant.pop("sizes", None)
+        variant.pop("kizMarked", None)
     payload = json.dumps(card, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode()).hexdigest()

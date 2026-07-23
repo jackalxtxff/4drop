@@ -239,11 +239,10 @@ def build_card(product: Product, price: Decimal, barcode: str, wb_brand: str) ->
     card = {"subjectID": subject_id, "variants": [variant]}
 
     # 289-ФЗ: подтверждаем, что товар маркирован средствами идентификации («Честный
-    # знак»). Без флага WB со временем блокирует карточку. Шины подлежат обязательной
-    # маркировке; диски — нет, поэтому ставим только шинам. Кладём и на уровень карточки
-    # (для /cards/upload), и в вариант (для /cards/update, который шлёт вариант).
+    # знак»). Без флага WB со временем блокирует карточку. По спеке WB kizMarked —
+    # свойство варианта (рядом с vendorCode), и в /cards/upload, и в /cards/update.
+    # Шины подлежат обязательной маркировке; диски — нет, поэтому ставим только шинам.
     if product.goods_type == "tyre":
-        card["kizMarked"] = True
         variant["kizMarked"] = True
 
     return card

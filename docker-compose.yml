@@ -1,3 +1,7 @@
+# Имя проекта закреплено: контейнеры и volume'ы остаются 4drop_* даже из папки dev/,
+# иначе БД (volume 4drop_pgdata) не переиспользуется и обнулится.
+name: 4drop
+
 services:
   db:
     image: postgres:16-alpine
@@ -12,8 +16,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # Только для локального доступа с самого сервера (psql/отладка). Наружу порт не
+    # публикуем: раньше 5432 торчал в интернет. Бэкенд ходит к БД по docker-сети (db:5432).
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
 
   redis:
     image: redis:7-alpine
@@ -38,8 +44,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Публично доступен через общий reverse-proxy (dev.4drop.vplink.app), который ходит
+    # к бэкенду по docker-сети. Хост-порт — только на localhost для отладки.
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend:/app
       - wsdl_cache:/cache
@@ -67,8 +75,9 @@ services:
       context: ./frontend
     depends_on:
       - backend
+    # Публично доступен через общий reverse-proxy; хост-порт — только на localhost.
     ports:
-      - "${FRONTEND_PORT:-5173}:5173"
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules

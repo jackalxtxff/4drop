@@ -44,7 +44,12 @@ export function Layout() {
     const list = await api.get<Supplier[]>("/suppliers");
     setSuppliers(list);
     // Выбранный поставщик мог быть удалён — не оставляем UI указывать в пустоту.
-    if (list.length && !list.some((s) => s.id === currentId)) setCurrentId(list[0].id);
+    if (!list.length) {
+      setCurrentIdState(null);
+      localStorage.removeItem(CURRENT_KEY);
+    } else if (!list.some((s) => s.id === currentId)) {
+      setCurrentId(list[0].id);
+    }
   };
 
   useEffect(() => {

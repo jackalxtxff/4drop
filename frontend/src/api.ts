@@ -107,6 +107,8 @@ export interface Credential {
   selected_warehouses: number[];
   addresses: Address[];
   address_id: number | null;
+  /** Только 4tochki: заказы уходят в тестовый контур, без реальной отгрузки. */
+  test_mode: boolean;
 }
 
 export interface Product {

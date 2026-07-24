@@ -96,6 +96,12 @@ class AddressSelectIn(BaseModel):
     address_id: int
 
 
+class TestModeIn(BaseModel):
+    """Переключатель тестового контура заказов 4tochki."""
+
+    test_mode: bool
+
+
 class CredentialOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     platform: str
@@ -109,6 +115,9 @@ class CredentialOut(BaseModel):
     # Только 4tochki: адреса доставки и активный (склады и сроки зависят от него).
     addresses: list[AddressOut] = []
     address_id: int | None = None
+    # Только 4tochki: заказы уходят в тестовый контур (CreateOrder is_test) — реальной
+    # отгрузки не происходит.
+    test_mode: bool = True
 
 
 # --- товары -----------------------------------------------------------------

@@ -341,7 +341,10 @@ async def cancel_supplier_order(
 
     order.supplier_cancel_attempts += 1
     order.supplier_cancelled_at = datetime.now(UTC)
-    order.supplier_status = "тест: отменён" if order.is_test else "отменён"
+    # Пометка контура — по тому, как заказ оформлялся у поставщика, а не по is_test
+    # заказа: тот про песочницу маркетплейса, это разные вещи.
+    was_test = (order.supplier_status or "").startswith("тест")
+    order.supplier_status = "тест: отменён" if was_test else "отменён"
     order.error = None
     return True, f"№ {order.supplier_order_number or order.supplier_order_id}"
 
@@ -385,18 +388,23 @@ async def place_supplier_order(
         )
     ) or (cred.settings or {}).get("address_id")
 
+    # Контур берём из подключения 4tochki. По умолчанию тестовый: боевой заказ — это
+    # реальная закупка шин, включать её можно только осознанно (см. connections).
+    is_test = (cred.settings or {}).get("test_mode", True)
+
     try:
         client = FourTochkiClient(secrets["login"], secrets["password"])
         created = await client.create_order(
-            lines, address_id=address_id, order_number=order.mp_order_id, is_test=True
+            lines, address_id=address_id, order_number=order.mp_order_id, is_test=is_test
         )
     except (FourTochkiError, KeyError) as exc:
         order.error = str(exc)
         return False, str(exc)
 
+    prefix = "тест: " if is_test else ""
     order.supplier_order_id = created.order_id
     order.supplier_order_number = created.order_number
-    order.supplier_status = "тест: принят" if created.success else "тест: ошибка"
+    order.supplier_status = f"{prefix}принят" if created.success else f"{prefix}ошибка"
     order.error = created.error if not created.success else None
     if not created.success:
         return False, created.error or "4tochki отклонил заказ"

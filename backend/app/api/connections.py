@@ -24,6 +24,7 @@ from app.schemas import (
     FourTochkiCredentialIn,
     OzonCredentialIn,
     PlatformMappingView,
+    TestModeIn,
     WarehouseMappingOut,
     WarehouseMappingsIn,
     WarehouseMappingsView,
@@ -89,6 +90,9 @@ def _credential_out(cred: Credential) -> CredentialOut:
         settings = cred.settings or {}
         out.address_id = settings.get("address_id")
         out.addresses = [AddressOut(**a) for a in (settings.get("addresses") or [])]
+        # По умолчанию тестовый контур ВКЛЮЧЁН: боевой заказ — это реальная закупка шин,
+        # и включать её можно только осознанным действием.
+        out.test_mode = settings.get("test_mode", True)
     return out
 
 
@@ -357,6 +361,23 @@ async def set_address(
     if not kept:
         notes.append("выберите склады заново — остатки сейчас нулевые")
     cred.status_message = ". ".join(notes)
+    await session.commit()
+    await session.refresh(cred)
+    return _credential_out(cred)
+
+
+@router.put("/fourtochki/test-mode", response_model=CredentialOut)
+async def set_test_mode(
+    payload: TestModeIn, supplier: SupplierDep, session: SessionDep
+) -> CredentialOut:
+    """Переключить контур оформления заказов у поставщика.
+
+    Тестовый контур — CreateOrder(is_test=True): 4tochki принимает заказ, но реальной
+    отгрузки не происходит. Выключение переводит оформление в боевой режим, то есть
+    заказы становятся настоящей закупкой. На уже оформленные заказы не влияет.
+    """
+    cred = await _require(session, supplier.id, Platform.FOURTOCHKI)
+    cred.settings = {**(cred.settings or {}), "test_mode": payload.test_mode}
     await session.commit()
     await session.refresh(cred)
     return _credential_out(cred)

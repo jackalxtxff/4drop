@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   api,
+  ApiError,
   type Credential,
   type PlatformMappingView,
   type Warehouse,
@@ -124,6 +125,96 @@ function Field({
         onChange={(e) => onChange(e.target.value)}
         className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-slate-400"
       />
+    </div>
+  );
+}
+
+/** Контур оформления заказов у поставщика. Выключение тестового режима означает, что
+ *  заказы становятся настоящей закупкой шин, поэтому переключение идёт через
+ *  подтверждение, а не одним кликом. Сохраняется сразу, отдельной кнопки нет. */
+function TestModeToggle({
+  cred,
+  supplierId,
+  onSaved,
+}: {
+  cred: Credential;
+  supplierId: number;
+  onSaved: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const apply = async (testMode: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.put(`/suppliers/${supplierId}/connections/fourtochki/test-mode`, {
+        test_mode: testMode,
+      });
+      setConfirming(false);
+      await onSaved();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Не удалось переключить контур");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={cred.test_mode}
+          disabled={busy}
+          onChange={(e) => (e.target.checked ? void apply(true) : setConfirming(true))}
+          className="mt-0.5 accent-slate-900"
+        />
+        <span>
+          Тестовый контур заказов
+          <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
+            {cred.test_mode
+              ? "Заказы уходят как тестовые (CreateOrder is_test) — 4tochki их принимает, но реальной отгрузки нет."
+              : "Боевой режим: оформление заказа — настоящая закупка у поставщика."}
+          </span>
+        </span>
+      </label>
+
+      {!cred.test_mode && (
+        <p className="mt-2 rounded-md bg-amber-50 px-2 py-1.5 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          Боевой режим включён. Каждый заказ с маркетплейса — реальная закупка шин.
+        </p>
+      )}
+
+      {confirming && (
+        <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2 dark:border-amber-900 dark:bg-amber-950/50">
+          <p className="text-xs text-amber-800 dark:text-amber-300">
+            Выключить тестовый контур? Заказы начнут оформляться у поставщика по-настоящему.
+            На уже оформленные это не влияет.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={busy}
+              className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              onClick={() => void apply(false)}
+              disabled={busy}
+              className="rounded-md bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-40"
+            >
+              {busy ? "…" : "Включить боевой режим"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
     </div>
   );
 }
@@ -706,6 +797,7 @@ export function ConnectionsPage() {
             onChange={(v) => setFt({ ...ft, password: v })}
             placeholder={ftCred?.secrets_masked.password ?? "пароль"}
           />
+          {ftCred && <TestModeToggle cred={ftCred} supplierId={supplierId!} onSaved={load} />}
         </Card>
 
         <Card

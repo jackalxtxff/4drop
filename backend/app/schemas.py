@@ -135,6 +135,22 @@ class ProductOut(BaseModel):
     integrations: list[ProductLinkOut] = []
 
 
+class ProductDetailOut(ProductOut):
+    """Карточка товара целиком — для модального окна по клику на наименование.
+
+    Отдаётся отдельным запросом, а не в списке: attrs — это полный контейнер атрибутов
+    из GetGoodsInfo (полсотни полей), и класть его в каждую из 200 строк страницы
+    значило бы раздувать ответ ради данных, нужных для одного товара.
+    """
+
+    weight: Decimal | None = None
+    volume: Decimal | None = None
+    tn_ved: int | None = None
+    # Все атрибуты 4tochki как есть — включая те, что не выведены колонками в таблицу.
+    attrs: dict = {}
+    updated_at: datetime | None = None
+
+
 class ProductStockOut(BaseModel):
     """Остаток по одному складу — для всплывающей подсказки над колонкой «Остаток»."""
 

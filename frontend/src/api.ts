@@ -128,6 +128,16 @@ export interface Product {
   integrations: ProductLink[];
 }
 
+/** Товар со всеми атрибутами 4tochki — для модалки по клику на наименование.
+ *  Грузится отдельным запросом: attrs это ~50 полей, в списке они не нужны. */
+export interface ProductDetail extends Product {
+  weight: string | null;
+  volume: string | null;
+  tn_ved: number | null;
+  attrs: Record<string, unknown>;
+  updated_at: string | null;
+}
+
 export interface ProductLink {
   platform: "wb" | "ozon";
   status: "none" | "pending" | "active" | "rejected" | "error";

@@ -23,6 +23,7 @@ from app.tasks.enqueue import enqueue_kind
 from app.schemas import (
     BlockRequest,
     IntegrateRequest,
+    ProductDetailOut,
     ProductFacets,
     ProductOut,
     ProductPage,
@@ -508,3 +509,42 @@ async def list_jobs(supplier: SupplierDep, session: SessionDep) -> list[SyncJob]
         .limit(20)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+# ВАЖНО: объявлять после статических путей (/facets, /jobs, /sync, /block, ...),
+# иначе «/{product_id}» перехватит их и они перестанут работать.
+@router.get("/{product_id}", response_model=ProductDetailOut)
+async def product_detail(
+    product_id: int, supplier: SupplierDep, session: SessionDep
+) -> ProductDetailOut:
+    """Полная карточка товара, включая attrs — все атрибуты 4tochki.
+
+    Нужна для модального окна по клику на наименование: в таблице выведена лишь часть
+    характеристик, а здесь отдаём всё, что знаем о товаре.
+    """
+    product = await session.get(Product, product_id)
+    if product is None or product.supplier_id != supplier.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Товар не найден у этого поставщика")
+
+    buffer = await session.scalar(
+        select(SyncSettings.stock_buffer).where(SyncSettings.supplier_id == supplier.id)
+    ) or 0
+
+    links = (
+        await session.execute(
+            select(ProductLink).where(ProductLink.product_id == product.id)
+        )
+    ).scalars().all()
+
+    item = ProductDetailOut.model_validate(product)
+    item.marketplace_rest = marketplace_stock(product.total_rest, buffer)
+    item.integrations = [
+        {
+            "platform": l.platform,
+            "status": l.status,
+            "status_message": l.status_message,
+            "nm_id": l.nm_id,
+        }
+        for l in links
+    ]
+    return item

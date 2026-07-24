@@ -14,6 +14,7 @@ import { useSupplier } from "../components/Layout";
 import { MultiSelect } from "../components/MultiSelect";
 import { StockTooltip } from "../components/StockTooltip";
 import { IntegrateDialog } from "../components/IntegrateDialog";
+import { ProductDialog } from "../components/ProductDialog";
 
 const PAGE_SIZE = 200;
 const ROW_HEIGHT = 56;
@@ -183,6 +184,8 @@ export function ProductsPage() {
   const [creds, setCreds] = useState<Credential[]>([]);
 
   const [zoom, setZoom] = useState<{ src: string; top: number; left: number } | null>(null);
+  // Товар, чью карточку со всеми характеристиками открыли кликом по наименованию.
+  const [detailId, setDetailId] = useState<number | null>(null);
   const [stockHover, setStockHover] = useState<{
     productId: number;
     totalRest: number;
@@ -792,7 +795,15 @@ export function ProductsPage() {
                           />
                         )}
                         <span className="min-w-0">
-                          <span className="block truncate">{p.name ?? "—"}</span>
+                          {/* Клик по наименованию открывает карточку со ВСЕМИ атрибутами
+                              (в таблице выведена лишь часть колонок). */}
+                          <button
+                            onClick={() => setDetailId(p.id)}
+                            title="Показать все характеристики"
+                            className="block max-w-full truncate text-left hover:text-slate-900 hover:underline dark:hover:text-white"
+                          >
+                            {p.name ?? "—"}
+                          </button>
                           <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
                             {p.brand} {p.model}
                           </span>
@@ -910,6 +921,14 @@ export function ProductsPage() {
           busy={integrating}
           onConfirm={() => void integrate(confirm)}
           onClose={() => setConfirm(null)}
+        />
+      )}
+
+      {detailId !== null && supplierId && (
+        <ProductDialog
+          supplierId={supplierId}
+          productId={detailId}
+          onClose={() => setDetailId(null)}
         />
       )}
 

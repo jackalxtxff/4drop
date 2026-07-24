@@ -302,13 +302,24 @@ class Order(Base):
     )
     platform: Mapped[str] = mapped_column(String(32))
     mp_order_id: Mapped[str] = mapped_column(String(128), index=True)
+    # supplierStatus — статус, которым управляет продавец (new/confirm/complete/cancel).
     mp_status: Mapped[str | None] = mapped_column(String(64))
+    # wbStatus — статус самой площадки. Нужен отдельно: отмену покупателем видно только
+    # здесь (declined_by_client), при supplierStatus, оставшемся new.
+    mp_wb_status: Mapped[str | None] = mapped_column(String(64))
 
     # Заказ в 4tochki. При FBS со своего склада создаётся через CreateOrder
     # (доставка на наш склад). CreateMarketplaceOrder понадобится, если перейдём на realFBS.
     supplier_order_id: Mapped[int | None] = mapped_column(Integer, index=True)
     supplier_order_number: Mapped[str | None] = mapped_column(String(64))
     supplier_status: Mapped[str | None] = mapped_column(String(64))
+    # Отметка отмены у поставщика — она же признак идемпотентности: повторный прогон
+    # планировщика не должен снова дёргать 4tochki по уже отменённому заказу.
+    supplier_cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Счётчик неудачных попыток отмены. 4tochki отменять умеет не всегда (заказ уже
+    # в отгрузке, тестовый заказ в статусе «Я формирую»), а планировщик ходит каждые
+    # 10 минут — без ограничения он бесконечно долбил бы API заведомо обречённым вызовом.
+    supplier_cancel_attempts: Mapped[int] = mapped_column(Integer, default=0)
 
     # Куда заказ едет на маркетплейсе: FBS-склад продавца, на который пришло
     # сборочное задание (WB order.warehouseId / Ozon posting.warehouse_id).
@@ -421,6 +432,15 @@ class SyncSettings(Base):
 
     # Отправка цен и остатков на WB и Ozon.
     push_interval_minutes: Mapped[int] = mapped_column(Integer, default=30)
+
+    # Проверка новых заказов на площадках. Часто: у FBS жёсткий дедлайн сборки, и
+    # пропущенный заказ — это срыв срока. Вебхуков по заказам у WB нет, поэтому опрос.
+    orders_interval_minutes: Mapped[int] = mapped_column(Integer, default=10)
+
+    # Автоматически оформлять заказ в 4tochki, как только заказ найден и у него
+    # определён склад-источник. Выключено по умолчанию: это реальная закупка у
+    # поставщика, включать её должен человек осознанно.
+    orders_auto_supplier: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Обновление атрибутов карточек (характеристики, название, картинки), когда они
     # изменились в 4tochki. Дорого: каждое обновление = повторная модерация, поэтому

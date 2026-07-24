@@ -236,6 +236,8 @@ class SyncSettingsIn(BaseModel):
     catalog_interval_minutes: int = Field(ge=0, le=10080)
     stocks_interval_minutes: int = Field(ge=0, le=10080)
     push_interval_minutes: int = Field(ge=0, le=10080)
+    orders_interval_minutes: int = Field(ge=0, le=10080)
+    orders_auto_supplier: bool = False
     cards_update_interval_minutes: int = Field(ge=0, le=10080)
     auto_mode: bool
     auto_cards_interval_minutes: int = Field(ge=0, le=10080)
@@ -253,6 +255,8 @@ class SyncSettingsOut(BaseModel):
     catalog_interval_minutes: int
     stocks_interval_minutes: int
     push_interval_minutes: int
+    orders_interval_minutes: int
+    orders_auto_supplier: bool
     cards_update_interval_minutes: int
     auto_mode: bool
     auto_cards_interval_minutes: int
@@ -310,6 +314,7 @@ class OrderOut(BaseModel):
     platform: str
     mp_order_id: str
     mp_status: str | None
+    mp_wb_status: str | None = None
     is_test: bool = False
 
     # Куда на маркетплейсе и откуда со склада 4tochki
@@ -322,6 +327,7 @@ class OrderOut(BaseModel):
     supplier_order_id: int | None
     supplier_order_number: str | None
     supplier_status: str | None
+    supplier_cancelled_at: datetime | None = None
 
     items: list = []
     error: str | None

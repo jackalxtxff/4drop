@@ -248,6 +248,8 @@ export function SyncPage() {
         catalog_interval_minutes: draft.catalog_interval_minutes,
         stocks_interval_minutes: draft.stocks_interval_minutes,
         push_interval_minutes: draft.push_interval_minutes,
+        orders_interval_minutes: draft.orders_interval_minutes,
+        orders_auto_supplier: draft.orders_auto_supplier,
         cards_update_interval_minutes: draft.cards_update_interval_minutes,
         auto_mode: draft.auto_mode,
         auto_cards_interval_minutes: draft.auto_cards_interval_minutes,
@@ -337,6 +339,37 @@ export function SyncPage() {
           onRun={() => void run("push")}
           running={isRunning("push")}
         />
+
+        <Row
+          title="Проверка заказов"
+          hint="Забирает новые сборочные задания FBS с площадок, сопоставляет с товаром и определяет склад-источник по привязке. Вебхуков по заказам у WB нет, поэтому только опрос — а у FBS жёсткий дедлайн сборки, так что чаще лучше."
+          value={draft.orders_interval_minutes}
+          onChange={(v) => setDraft({ ...draft, orders_interval_minutes: v })}
+          onRun={() => void run("orders")}
+          running={isRunning("orders")}
+          warning={
+            draft.orders_interval_minutes === 0
+              ? "Выключено. Новые заказы не подтянутся сами — только по кнопке на странице «Заказы»."
+              : undefined
+          }
+        />
+
+        <label className="flex items-start gap-2 px-1 pb-2 text-sm">
+          <input
+            type="checkbox"
+            checked={draft.orders_auto_supplier}
+            onChange={(e) => setDraft({ ...draft, orders_auto_supplier: e.target.checked })}
+            className="mt-0.5 accent-slate-900"
+          />
+          <span>
+            Сразу оформлять заказ у поставщика
+            <span className="block text-xs text-slate-500 dark:text-slate-400">
+              Найденный заказ автоматически уходит в 4tochki (тестовый контур,
+              CreateOrder is_test) с адреса того FBS-склада, куда он пришёл. Без галочки
+              заказ оформляется вручную кнопкой в таблице.
+            </span>
+          </span>
+        </label>
 
         <Row
           title="Обновление карточек"

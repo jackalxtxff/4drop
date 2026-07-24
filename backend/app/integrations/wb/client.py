@@ -71,6 +71,22 @@ class WBClient:
         self.sandbox = is_test_token(api_key)
         self._hosts = SANDBOX_HOSTS if self.sandbox else PROD_HOSTS
 
+    # Глобальный лимитер WB (429) срабатывает на весь аккаунт продавца, а не на метод,
+    # и в песочнице он заметно жёстче боевого. Один 429 не должен ронять всю задачу:
+    # ждём и повторяем. Задержка растёт линейно — WB не отдаёт Retry-After.
+    RETRY_429 = 4
+    RETRY_PAUSE = 15.0
+
+    async def _send(self, http: httpx.AsyncClient, method: str, url: str, **kw) -> httpx.Response:
+        """Запрос с повтором на 429. Остальные коды возвращаем как есть — их
+        разбирают вызывающие, у каждого свой текст ошибки."""
+        for attempt in range(self.RETRY_429):
+            resp = await http.request(method, url, headers=self._headers, **kw)
+            if resp.status_code != 429:
+                return resp
+            await asyncio.sleep(self.RETRY_PAUSE * (attempt + 1))
+        return resp
+
     async def check(self) -> tuple[bool, str]:
         """Проверяет ключ по каждой нужной категории отдельно.
 
@@ -162,10 +178,8 @@ class WBClient:
             for i in range(0, len(cards), self.UPLOAD_CHUNK):
                 chunk = cards[i : i + self.UPLOAD_CHUNK]
                 try:
-                    resp = await http.post(
-                        f"{self._content}/content/v2/cards/upload",
-                        headers=self._headers,
-                        json=chunk,
+                    resp = await self._send(
+                        http, "POST", f"{self._content}/content/v2/cards/upload", json=chunk
                     )
                 except httpx.HTTPError as exc:
                     errors.append(f"сеть: {exc.__class__.__name__}")
@@ -196,10 +210,8 @@ class WBClient:
             for i in range(0, len(variants), self.UPLOAD_CHUNK):
                 chunk = variants[i : i + self.UPLOAD_CHUNK]
                 try:
-                    resp = await http.post(
-                        f"{self._content}/content/v2/cards/update",
-                        headers=self._headers,
-                        json=chunk,
+                    resp = await self._send(
+                        http, "POST", f"{self._content}/content/v2/cards/update", json=chunk
                     )
                 except httpx.HTTPError as exc:
                     errors.append(f"сеть: {exc.__class__.__name__}")
@@ -244,10 +256,8 @@ class WBClient:
         if count <= 0:
             return []
         async with httpx.AsyncClient(timeout=self._timeout) as http:
-            resp = await http.post(
-                f"{self._content}/content/v2/barcodes",
-                headers=self._headers,
-                json={"count": count},
+            resp = await self._send(
+                http, "POST", f"{self._content}/content/v2/barcodes", json={"count": count}
             )
         if resp.status_code != 200:
             raise WBError(f"Генерация штрихкодов: HTTP {resp.status_code} — {_detail(resp)}")
@@ -299,9 +309,10 @@ class WBClient:
 
         async with httpx.AsyncClient(timeout=self._timeout) as http:
             while True:
-                resp = await http.post(
+                resp = await self._send(
+                    http,
+                    "POST",
                     f"{self._content}/content/v2/get/cards/list",
-                    headers=self._headers,
                     json={"settings": {"cursor": cursor, "filter": {"withPhoto": -1}}},
                 )
                 if resp.status_code != 200:
@@ -450,6 +461,70 @@ class WBClient:
 
         return list(collected.values())
 
+    async def order_statuses(self, order_ids: list[int]) -> dict[str, dict]:
+        """POST /api/v3/orders/status — статусы заданий по их ID.
+
+        Отмену иначе не увидеть: /orders/new отдаёт только ждущие сборки, а в истории
+        у задания остаётся его прежний статус. Отмена живёт в двух полях:
+        supplierStatus='cancel' (отменил продавец) и wbStatus из семейства canceled/
+        declined_by_client/defect (отменил покупатель или WB).
+
+        Возвращает mp_order_id (строкой) → {supplier_status, wb_status, is_cancellable}.
+        """
+        out: dict[str, dict] = {}
+        if not order_ids:
+            return out
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            for i in range(0, len(order_ids), 1000):
+                resp = await self._send(
+                    http,
+                    "POST",
+                    f"{self._marketplace}/api/v3/orders/status",
+                    json={"orders": order_ids[i : i + 1000]},
+                )
+                if resp.status_code != 200:
+                    raise WBError(f"Статусы заданий: HTTP {resp.status_code} — {_detail(resp)}")
+                for o in resp.json().get("orders") or []:
+                    out[str(o.get("id"))] = {
+                        "supplier_status": o.get("supplierStatus"),
+                        "wb_status": o.get("wbStatus"),
+                        "is_cancellable": bool(o.get("isCancellable")),
+                    }
+                await asyncio.sleep(self.PAUSE_SECONDS)
+        return out
+
+    async def cancel_order(self, order_id: int) -> None:
+        """PATCH /api/v3/orders/{orderId}/cancel — отменить задание продавцом.
+
+        Возможна только до передачи задания WB (см. isCancellable в order_statuses):
+        иначе WB отвечает 409, и это не сбой интеграции, а запрет по статусу.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            resp = await self._send(
+                http, "PATCH", f"{self._marketplace}/api/v3/orders/{order_id}/cancel"
+            )
+        if resp.status_code not in (200, 204):
+            raise WBError(f"Отмена задания {order_id}: HTTP {resp.status_code} — {_detail(resp)}")
+
+    async def test_decline_order(self, order_id: int) -> None:
+        """PATCH /api/v3/test/fbs/orders/{orderId}/decline — эмуляция отмены покупателем.
+
+        Только песочница: метод тестового контура. Доступен в течение часа после
+        создания задания и только пока оно не переведено на сборку.
+        """
+        if not self.sandbox:
+            raise WBError("Эмуляция отмены доступна только в песочнице WB")
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            resp = await self._send(
+                http,
+                "PATCH",
+                f"{self._marketplace}/api/v3/test/fbs/orders/{order_id}/decline",
+            )
+        if resp.status_code not in (200, 204):
+            raise WBError(
+                f"Тестовая отмена {order_id}: HTTP {resp.status_code} — {_detail(resp)}"
+            )
+
     async def current_prices(self) -> dict[int, tuple[int, int]]:
         """nmID → (цена до скидки, процент скидки). Нужно, чтобы не слать неизменённое:
         WB отклоняет ВЕСЬ батч, если хоть одна пара цена+скидка уже установлена."""
@@ -497,10 +572,8 @@ class WBClient:
         if not items:
             return 0, None
         async with httpx.AsyncClient(timeout=self._timeout) as http:
-            resp = await http.post(
-                f"{self._prices}/api/v2/upload/task",
-                headers=self._headers,
-                json={"data": items},
+            resp = await self._send(
+                http, "POST", f"{self._prices}/api/v2/upload/task", json={"data": items}
             )
         if resp.status_code == 200 and not resp.json().get("error"):
             return len(items), None
@@ -509,11 +582,11 @@ class WBClient:
     async def update_stocks(
         self, warehouse_id: int, stocks: list[dict]
     ) -> tuple[int, str | None]:
-        """PUT /api/v3/stocks/{warehouseId}. stocks: [{"sku": barcode, "amount": int}].
+        """PUT /api/v3/stocks/{warehouseId}. stocks: [{"chrtId": int, "amount": int}].
 
-        WB принимает остатки FBS по складу и штрихкоду, а не по nmID/chrtID.
-        WB требует валидный штрихкод (EAN): карточка примет любой vendorCode, а
-        stocks — нет, поэтому баркоды карточек должны быть настоящими.
+        Остатки идут по chrtId (ID размера карточки), а не по штрихкоду: на sku WB
+        отвечает 400 IncorrectRequest. Важно: имена полей WB не валидирует — при
+        неверном ключе вернётся 204, а остаток молча не обновится.
         """
         if not stocks:
             return 0, None
@@ -521,9 +594,10 @@ class WBClient:
         async with httpx.AsyncClient(timeout=self._timeout) as http:
             for i in range(0, len(stocks), 1000):
                 chunk = stocks[i : i + 1000]
-                resp = await http.put(
+                resp = await self._send(
+                    http,
+                    "PUT",
                     f"{self._marketplace}/api/v3/stocks/{warehouse_id}",
-                    headers=self._headers,
                     json={"stocks": chunk},
                 )
                 if resp.status_code not in (200, 204):

@@ -28,6 +28,10 @@ from app.config import get_settings
 
 log = logging.getLogger(__name__)
 
+# «Заказ отменен» из справочника GetStatusList. Отдельной операции отмены в API нет —
+# заказ отменяется переводом в этот статус через SetOrderStatus.
+ORDER_STATUS_CANCELLED = 14
+
 # Контейнеры GetGoodsInfo → наш тип товара.
 GOODS_CONTAINERS = {
     "tyreList": "tyre",
@@ -663,6 +667,60 @@ class FourTochkiClient:
             for entry in result or []:
                 out.append({k: _jsonable(v) for k, v in serialize_object(entry, dict).items()})
         return out
+
+    async def cancel_order(self, order_id: int, order_number: str | None = None) -> None:
+        """Отменить заказ: SetOrderStatus(orderNumber, statusID=14, orderID).
+
+        14 — «Заказ отменен» из справочника GetStatusList. Отдельной операции отмены в
+        API нет. Внимание: тестовый заказ (CreateOrder is_test=True) остаётся в статусе
+        «Я формирую», и на нём 4tochki отменять запрещает — отвечает кодом 50. Текст
+        ошибки поднимаем как есть, чтобы в заказе было видно настоящую причину.
+        """
+        result = await self._call(
+            "SetOrderStatus", order_number or "", ORDER_STATUS_CANCELLED, order_id
+        )
+        data = serialize_object(result, dict) or {}
+        # WCF отдаёт поля с большой буквы (Success/Error), но у части операций — с малой.
+        if data.get("Success", data.get("success", False)):
+            return
+        err = data.get("Error") or data.get("error") or {}
+        reason = err.get("comment") or err.get("code") or "причина не указана"
+        raise FourTochkiError(f"4tochki не отменил заказ {order_number or order_id}: {reason}")
+
+    async def reduce_order_quantity(
+        self, order_id: int, customer_id: int, changes: list[tuple[int, int]]
+    ) -> None:
+        """SetOrderUpdate — уменьшить количество позиций заказа.
+
+        changes: [(orderProductID, на сколько уменьшить)]. Частичная отмена: снять весь
+        заказ так нельзя, 4tochki отвечает «В заказе не осталось позиций после
+        уменьшения количества» (код 72).
+        """
+        result = await self._call(
+            "SetOrderUpdate",
+            {
+                "customerID": customer_id,
+                "orderID": order_id,
+                "productChangeList": {
+                    "ProductChangeListItem": [
+                        {"orderProductID": pid, "reduceQuantity": qty} for pid, qty in changes
+                    ]
+                },
+            },
+        )
+        data = serialize_object(result, dict) or {}
+        if data.get("success", data.get("Success", False)):
+            return
+        err = data.get("error") or data.get("Error") or {}
+        raise FourTochkiError(
+            f"4tochki не изменил заказ {order_id}: "
+            f"{err.get('comment') or err.get('code') or 'причина не указана'}"
+        )
+
+    async def get_order_info(self, order_id: int) -> dict[str, Any]:
+        """GetOrderInfo2 — карточка заказа: статус, позиции, orderProductID, склады."""
+        result = await self._call("GetOrderInfo2", order_id)
+        return {k: _jsonable(v) for k, v in (serialize_object(result, dict) or {}).items()}
 
 
 def _jsonable(value: Any) -> Any:

@@ -20,6 +20,7 @@ KINDS = {
     "catalog": "sync_catalog",
     "stocks": "sync_stocks",
     "push": "push_marketplaces",
+    "orders": "sync_orders",
     "cards_update": "update_cards",
     "auto_cards": "auto_cards",
     "cards": "create_cards",

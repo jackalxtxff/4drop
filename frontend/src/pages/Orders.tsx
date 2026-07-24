@@ -15,6 +15,30 @@ const STATUS_STYLE: Record<string, string> = {
   cancel: "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300",
 };
 
+// Отмена приходит либо от продавца (mp_status), либо от покупателя/WB (mp_wb_status):
+// при отмене покупателем supplierStatus остаётся new, и по нему отмену не видно.
+const CANCELLED_MP = ["cancel", "cancel_carrier"];
+const CANCELLED_WB = [
+  "canceled",
+  "canceled_by_client",
+  "declined_by_client",
+  "canceled_by_carrier",
+  "defect",
+];
+
+function isCancelled(o: Order): boolean {
+  return (
+    (o.mp_status != null && CANCELLED_MP.includes(o.mp_status)) ||
+    (o.mp_wb_status != null && CANCELLED_WB.includes(o.mp_wb_status))
+  );
+}
+
+/** Карточка заказа в ЛК 4tochki. В адресе — числовой orderID (17915279), а не номер
+ *  заказа (F7915279), поэтому ссылку строим по supplier_order_id. */
+function supplierOrderUrl(orderId: number): string {
+  return `https://b2b.4tochki.ru/Order/Details/${orderId}`;
+}
+
 function money(v: number | null): string {
   if (v == null) return "—";
   return v.toLocaleString("ru", { maximumFractionDigits: 2 }) + " ₽";
@@ -33,17 +57,26 @@ function OrdersTable({
 }) {
   const [busy, setBusy] = useState<number | null>(null);
 
-  const createSupplierOrder = async (order: Order) => {
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const run = async (order: Order, path: string) => {
     setBusy(order.id);
+    setActionError(null);
     try {
-      await api.post(`/suppliers/${supplierId}/orders/${order.id}/supplier-order`);
+      await api.post(`/suppliers/${supplierId}/orders/${order.id}/${path}`);
       await onChanged();
-    } catch {
-      /* ошибка отобразится в колонке заказа после перезагрузки */
+    } catch (e) {
+      // Отмену площадка может запретить (задание уже передано WB) — причину надо показать,
+      // молча гасить нельзя: пользователь иначе решит, что кнопка не работает.
+      setActionError(e instanceof ApiError ? e.message : "Не удалось выполнить действие");
     } finally {
       setBusy(null);
     }
   };
+
+  const createSupplierOrder = (order: Order) => run(order, "supplier-order");
+  const cancelOrder = (order: Order) => run(order, "cancel");
+  const testDecline = (order: Order) => run(order, "test-decline");
 
   if (orders.length === 0) {
     return (
@@ -54,7 +87,13 @@ function OrdersTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+    <>
+      {actionError && (
+        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+          {actionError}
+        </div>
+      )}
+      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
       <table className="w-full min-w-[1000px] text-sm">
         <thead>
           <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-400 dark:border-slate-800">
@@ -66,6 +105,7 @@ function OrdersTable({
             <th className="px-4 py-3 font-medium">FBS-склад (куда)</th>
             <th className="px-4 py-3 font-medium">Склад 4tochki (откуда)</th>
             <th className="px-4 py-3 font-medium">Заказ в 4tochki</th>
+            <th className="px-4 py-3 font-medium">Отмена</th>
           </tr>
         </thead>
         <tbody>
@@ -105,7 +145,10 @@ function OrdersTable({
                 <td className="px-4 py-3">{item?.qty ?? "—"}</td>
                 <td className="px-4 py-3">{money(item?.price ?? null)}</td>
                 <td className="px-4 py-3">
-                  {o.fbs_warehouse_name ?? o.fbs_warehouse_id ?? "—"}
+                  {/* Имя склада, а не его id: по «35498» не понять, из какого города заказ.
+                      Голый id остаётся только если склада нет в кэше подключения. */}
+                  {o.fbs_warehouse_name ??
+                    (o.fbs_warehouse_id ? `Склад ${o.fbs_warehouse_id}` : "—")}
                 </td>
                 <td className="px-4 py-3">
                   {o.source_warehouse_name ? (
@@ -124,9 +167,15 @@ function OrdersTable({
                 <td className="px-4 py-3">
                   {o.supplier_order_id ? (
                     <div>
-                      <div className="text-xs">
+                      <a
+                        href={supplierOrderUrl(o.supplier_order_id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Открыть заказ в личном кабинете 4tochki"
+                        className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+                      >
                         № {o.supplier_order_number ?? o.supplier_order_id}
-                      </div>
+                      </a>
                       <div className="text-[11px] text-slate-500">{o.supplier_status}</div>
                     </div>
                   ) : o.error ? (
@@ -150,12 +199,48 @@ function OrdersTable({
                     </button>
                   )}
                 </td>
+                <td className="px-4 py-3">
+                  {isCancelled(o) ? (
+                    <div>
+                      <div className="text-xs text-red-600 dark:text-red-400">отменён</div>
+                      <div className="text-[11px] text-slate-500">
+                        {o.supplier_cancelled_at
+                          ? "в 4tochki тоже"
+                          : o.supplier_order_id
+                            ? "в 4tochki — нет"
+                            : "заказа у поставщика не было"}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      <button
+                        onClick={() => void cancelOrder(o)}
+                        disabled={busy === o.id}
+                        title="Отменит задание на площадке и заказ у поставщика"
+                        className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:hover:bg-slate-800"
+                      >
+                        {busy === o.id ? "…" : "Отменить"}
+                      </button>
+                      {o.is_test && o.platform === "wb" && (
+                        <button
+                          onClick={() => void testDecline(o)}
+                          disabled={busy === o.id}
+                          title="Песочница: эмулировать отмену покупателем"
+                          className="rounded-md border border-dashed border-slate-300 px-2.5 py-1.5 text-[11px] text-slate-500 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:hover:bg-slate-800"
+                        >
+                          отмена покупателем
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </td>
               </tr>
             );
           })}
-        </tbody>
-      </table>
-    </div>
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }
 

@@ -161,14 +161,17 @@ async def create_wb_cards(
     }
 
     # Реестры брендов по категориям — чтобы бренд ушёл в точном написании WB.
+    # Недоступность реестра не блокирует создание: в песочнице этого метода нет вовсе
+    # (404). Тогда registry=None и бренд уходит как есть (см. resolve_wb_brand).
     subjects = {SUBJECT_BY_TYPE.get(p.goods_type) for p in products}
     subjects.discard(None)
-    brand_registry: dict[int, dict[str, str]] = {}
-    try:
-        for sid in subjects:
+    brand_registry: dict[int, dict[str, str] | None] = {}
+    for sid in subjects:
+        try:
             brand_registry[sid] = await client.list_brands(sid)
-    except WBError as exc:
-        return "error", f"Не удалось получить реестр брендов WB: {exc}"
+        except WBError as exc:
+            log.warning("Реестр брендов WB недоступен (предмет %s): %s", sid, exc)
+            brand_registry[sid] = None
 
     # Штрихкоды генерирует WB. Нужны только НОВЫМ товарам (у существующих берём из
     # карточки кабинета), у кого ещё нет годного EAN в связи.

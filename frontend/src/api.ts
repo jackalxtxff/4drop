@@ -208,6 +208,9 @@ export interface SyncSettings {
   catalog_interval_minutes: number;
   stocks_interval_minutes: number;
   push_interval_minutes: number;
+  orders_interval_minutes: number;
+  /** Автоматически оформлять найденный заказ у поставщика (тестовый контур). */
+  orders_auto_supplier: boolean;
   cards_update_interval_minutes: number;
   auto_mode: boolean;
   auto_cards_interval_minutes: number;
@@ -263,6 +266,8 @@ export interface Order {
   platform: "wb" | "ozon";
   mp_order_id: string;
   mp_status: string | null;
+  /** wbStatus — статус площадки. Отмену покупателем видно только здесь. */
+  mp_wb_status: string | null;
   is_test: boolean;
   fbs_warehouse_id: string | null;
   fbs_warehouse_name: string | null;
@@ -271,6 +276,7 @@ export interface Order {
   supplier_order_id: number | null;
   supplier_order_number: string | null;
   supplier_status: string | null;
+  supplier_cancelled_at: string | null;
   items: OrderItem[];
   error: string | null;
   created_at: string;

@@ -50,17 +50,20 @@ def _wh_stock_items(
     Выключенный склад, заблокированный товар или склад без привязки → остаток 0
     (товар с него не продаётся). Иначе — сумма остатков по привязанным складам 4tochki
     минус буфер. rows — список (ProductLink, Product).
+
+    Остаток адресуется по chrtId (ID размера карточки WB), поэтому связи без chrt_id
+    пропускаем: без него позицию не отправить.
     """
     items: list[dict] = []
     for link, product in rows:
-        if not link.barcode:
+        if not link.chrt_id:
             continue
         if is_disabled or product.sync_blocked or not bound:
             amount = 0
         else:
             real = sum(stock_by_prod.get(product.id, {}).get(w, 0) for w in bound)
             amount = marketplace_stock(real, buffer)
-        items.append({"sku": link.barcode, "amount": amount})
+        items.append({"chrtId": link.chrt_id, "amount": amount})
     return items
 
 

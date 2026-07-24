@@ -90,14 +90,16 @@ async def _update_wb_cards(
     client = WBClient(api_key)
 
     # Реестры брендов категорий — чтобы бренд ушёл в точном написании WB.
+    # Недоступность реестра не блокирует обновление (в песочнице метода нет — 404):
+    # тогда registry=None и бренд уходит как есть (см. resolve_wb_brand).
     subjects = {SUBJECT_BY_TYPE.get(p.goods_type) for _l, p in rows}
     subjects.discard(None)
-    brand_registry: dict[int, dict[str, str]] = {}
-    try:
-        for sid in subjects:
+    brand_registry: dict[int, dict[str, str] | None] = {}
+    for sid in subjects:
+        try:
             brand_registry[sid] = await client.list_brands(sid)
-    except WBError as exc:
-        return "error", f"Не удалось получить реестр брендов WB: {exc}"
+        except WBError:
+            brand_registry[sid] = None
 
     changed_cards: list[dict] = []
     changed_links: list[tuple[ProductLink, Product, str]] = []

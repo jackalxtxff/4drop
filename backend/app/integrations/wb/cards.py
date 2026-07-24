@@ -86,15 +86,21 @@ def resolve_wb_brand(
     причём регистр у брендов разный: HANKOOK, но Yokohama, Kama, MICHELIN — угадывать
     нельзя. Поэтому сопоставляем без регистра с реальным реестром категории.
     manual_map — ручной override (высший приоритет) для случаев, когда имя бренда в
-    4tochki не совпадает с WB (напр. «Galaxy (Yokohama ATG)»). None на выходе означает
-    «бренда нет в реестре» — карточку не собираем, сообщаем понятную причину.
+    4tochki не совпадает с WB (напр. «Galaxy (Yokohama ATG)»).
+
+    registry=None означает «реестр недоступен» (в песочнице этого метода нет вовсе) —
+    тогда отдаём бренд как есть, а не блокируем создание карточки. registry={} — это
+    пустой реестр категории, и тогда None на выходе значит «бренда нет», карточку не
+    собираем и сообщаем понятную причину.
     """
     if not brand:
         return None
     key = brand.strip().lower()
     if manual_map and key in manual_map:
         return manual_map[key]
-    return (registry or {}).get(key)
+    if registry is None:
+        return brand
+    return registry.get(key)
 
 
 def is_ours(vendor_code_value: str | None) -> bool:

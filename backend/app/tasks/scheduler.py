@@ -23,6 +23,7 @@ KINDS = {
     "catalog": "sync_catalog",
     "stocks": "sync_stocks",
     "push": "push_marketplaces",
+    "orders": "sync_orders",
     "cards_update": "update_cards",
     "auto_cards": "auto_cards",
 }
@@ -95,6 +96,9 @@ async def schedule_due(ctx: dict) -> None:
                 "catalog": settings.catalog_interval_minutes,
                 "stocks": settings.stocks_interval_minutes,
                 "push": settings.push_interval_minutes,
+                # Заказы: вебхуков по ним у WB нет, поэтому опрашиваем часто —
+                # пропущенный заказ FBS это сорванный дедлайн сборки.
+                "orders": settings.orders_interval_minutes,
                 "cards_update": settings.cards_update_interval_minutes,
                 # Авто-создание идёт по расписанию только при включённом авто-режиме.
                 "auto_cards": (

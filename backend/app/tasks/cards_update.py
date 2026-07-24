@@ -119,7 +119,7 @@ async def _update_wb_cards(
         wb_brand = resolve_wb_brand(product.brand, brand_registry.get(subject_id), brand_map)
         try:
             # Обновление идёт по существующему штрихкоду связи (WB не выдаёт новый).
-            card = build_card(product, price, link.barcode or "", wb_brand)
+            card = build_card(product, price, link.barcode or "", wb_brand, settings.vendor_prefix)
         except CardBuildError:
             build_errors += 1
             continue

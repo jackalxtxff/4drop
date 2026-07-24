@@ -239,6 +239,10 @@ export function SyncPage() {
   const dirty =
     draft && settings && JSON.stringify(draft) !== JSON.stringify(settings);
 
+  // Пустой или «неартикульный» префикс бэкенд отклонит — не даём сохранить весь набор
+  // настроек из-за одного поля.
+  const prefixValid = !!draft && /^[A-Za-z0-9_-]+$/.test(draft.vendor_prefix);
+
   const save = async () => {
     if (!draft || !supplierId) return;
     setSaving(true);
@@ -256,6 +260,7 @@ export function SyncPage() {
         auto_cards_batch_limit: draft.auto_cards_batch_limit,
         missing_strategy: draft.missing_strategy,
         stock_buffer: draft.stock_buffer,
+        vendor_prefix: draft.vendor_prefix,
         wb_price_formula: draft.wb_price_formula,
         ozon_price_formula: draft.ozon_price_formula,
         wb_price_before_formula: draft.wb_price_before_formula,
@@ -631,7 +636,9 @@ export function SyncPage() {
           между синхронизациями.
         </p>
 
-        <div className="mt-4 flex flex-wrap items-center gap-4">
+        {/* items-end: над инпутом есть лейбл, и по центру серая подсказка вставала бы
+            выше поля. По нижнему краю они выравниваются. */}
+        <div className="mt-4 flex flex-wrap items-end gap-4">
           <div>
             <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
               Буфер, шт.
@@ -664,10 +671,72 @@ export function SyncPage() {
         </div>
       </section>
 
+      <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+        <h2 className="font-semibold tracking-tight">Префикс артикулов</h2>
+        <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+          С этого префикса начинается артикул (vendorCode) карточек, которые создаёт
+          система. По нему она отличает свои карточки от товаров, которые вы завели в
+          кабинете сами, — и не меняет чужие цены и остатки. Латиница, цифры, дефис и
+          подчёркивание, до 16 символов.
+        </p>
+
+        {/* items-end: над инпутом есть лейбл, и по центру серая подсказка вставала бы
+            выше поля. По нижнему краю они выравниваются. */}
+        <div className="mt-4 flex flex-wrap items-end gap-4">
+          <div>
+            <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
+              Префикс
+            </label>
+            <input
+              value={draft.vendor_prefix}
+              onChange={(e) => setDraft({ ...draft, vendor_prefix: e.target.value.trim() })}
+              maxLength={16}
+              placeholder="4D-"
+              className="mt-1 w-32 rounded-md border border-slate-300 px-3 py-2 font-mono text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            />
+          </div>
+
+          {/* Показываем готовый артикул на живом примере: иначе неочевидно, что дефис
+              (или его отсутствие) — часть префикса, а не разделитель от нас. */}
+          <div className="rounded-lg bg-slate-50 px-4 py-2.5 text-sm text-slate-600 dark:bg-slate-800/60 dark:text-slate-400">
+            {!/^[A-Za-z0-9_-]+$/.test(draft.vendor_prefix) ? (
+              <span className="text-red-600 dark:text-red-400">
+                {draft.vendor_prefix
+                  ? "Допустимы только латиница, цифры, дефис и подчёркивание."
+                  : "Префикс не может быть пустым: без него система не отличит свои карточки от чужих."}
+              </span>
+            ) : (
+              <>
+                Артикул товара 3480030506 будет{" "}
+                <b className="font-mono text-slate-900 dark:text-slate-100">
+                  {draft.vendor_prefix}3480030506
+                </b>
+              </>
+            )}
+          </div>
+        </div>
+
+        {draft.vendor_prefix !== settings?.vendor_prefix && (
+          <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+            Новый префикс получат только карточки, созданные после сохранения. У уже
+            созданных артикул на маркетплейсе не меняется — WB не даёт его переписать. Они
+            останутся «своими»: прежний префикс запоминается, и система продолжит их
+            узнавать, а не заведёт дубли.
+          </p>
+        )}
+
+        {(settings?.vendor_prefix_history?.length ?? 0) > 0 && (
+          <p className="mt-3 text-xs text-slate-400">
+            Прежние префиксы, которые тоже считаются нашими:{" "}
+            <span className="font-mono">{settings?.vendor_prefix_history.join(", ")}</span>
+          </p>
+        )}
+      </section>
+
       <div className="flex items-center gap-3">
         <button
           onClick={() => void save()}
-          disabled={!dirty || saving}
+          disabled={!dirty || saving || !prefixValid}
           className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900"
         >
           {saving ? "Сохраняем…" : "Сохранить настройки"}

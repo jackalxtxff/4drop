@@ -67,9 +67,19 @@ async def set_sync_settings(
         settings.ozon_price_before_formula,
     )
     buffer_before = settings.stock_buffer
+    prefix_before = settings.vendor_prefix
 
     for field, value in payload.model_dump().items():
         setattr(settings, field, value)
+
+    # Прежний префикс запоминаем: карточки, созданные под ним, должны остаться «своими»,
+    # иначе система перестанет их узнавать и заведёт дубли с новым артикулом.
+    if settings.vendor_prefix != prefix_before:
+        history = list(settings.vendor_prefix_history or [])
+        if prefix_before not in history:
+            history.append(prefix_before)
+        settings.vendor_prefix_history = [p for p in history if p != settings.vendor_prefix]
+
     await session.commit()
     await session.refresh(settings)
 

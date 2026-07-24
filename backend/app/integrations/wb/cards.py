@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from decimal import Decimal
 
-from app.models import Product
+from app.models import DEFAULT_VENDOR_PREFIX, Product
 
 # Предмет WB по типу товара 4tochki.
 SUBJECT_BY_TYPE: dict[str, int] = {
@@ -66,12 +67,14 @@ class CardBuildError(ValueError):
 # которые продавец завёл сам: сопоставление идёт по vendorCode, и без метки чужая
 # карточка со случайно совпавшим артикулом была бы «присвоена» и ей поменяли бы
 # цену/остаток. С префиксом пересечение с чужими артикулами исключено.
-VENDOR_PREFIX = "4D-"
+# Значение настраивается на странице синхронизации (SyncSettings.vendor_prefix);
+# здесь только дефолт для вызовов без явного префикса.
+VENDOR_PREFIX = DEFAULT_VENDOR_PREFIX
 
 
-def vendor_code(product: Product) -> str:
+def vendor_code(product: Product, prefix: str = VENDOR_PREFIX) -> str:
     """Артикул продавца (vendorCode) для карточки WB. Ключ сопоставления с нашей базой."""
-    return f"{VENDOR_PREFIX}{product.cae}"
+    return f"{prefix}{product.cae}"
 
 
 def resolve_wb_brand(
@@ -103,9 +106,15 @@ def resolve_wb_brand(
     return registry.get(key)
 
 
-def is_ours(vendor_code_value: str | None) -> bool:
-    """Наша ли это карточка — по префиксу vendorCode. Защита от правки чужих товаров."""
-    return bool(vendor_code_value) and vendor_code_value.startswith(VENDOR_PREFIX)
+def is_ours(vendor_code_value: str | None, prefixes: Sequence[str] = (VENDOR_PREFIX,)) -> bool:
+    """Наша ли это карточка — по префиксу vendorCode. Защита от правки чужих товаров.
+
+    prefixes — текущий префикс плюс все, что использовались раньше: карточки, созданные
+    до смены префикса, обязаны остаться «своими», иначе система завела бы им дубли.
+    """
+    return bool(vendor_code_value) and any(
+        vendor_code_value.startswith(p) for p in prefixes if p
+    )
 
 
 def _package_dims(product: Product) -> dict:
@@ -183,7 +192,13 @@ def _characteristics(product: Product) -> list[dict]:
     return chars
 
 
-def build_card(product: Product, price: Decimal, barcode: str, wb_brand: str) -> dict:
+def build_card(
+    product: Product,
+    price: Decimal,
+    barcode: str,
+    wb_brand: str,
+    prefix: str = VENDOR_PREFIX,
+) -> dict:
     """Карточка для POST /content/v2/cards/upload.
 
     price — цена продажи с уже применённой наценкой, в рублях.
@@ -225,7 +240,7 @@ def build_card(product: Product, price: Decimal, barcode: str, wb_brand: str) ->
     )
 
     variant = {
-        "vendorCode": vendor_code(product),
+        "vendorCode": vendor_code(product, prefix),
         # WB режет заголовок по 60 символов — обрезаем сами, иначе карточка
         # уйдёт в ошибку модерации целиком.
         "title": (product.name or f"{product.brand} {size}")[:60],

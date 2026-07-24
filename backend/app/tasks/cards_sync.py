@@ -143,10 +143,17 @@ async def create_wb_cards(
         if img and link.nm_id:
             await client.upload_photo(link.nm_id, img)
 
+    # Префикс артикулов настраиваемый; своими считаем карточки и с прежними префиксами,
+    # иначе после смены префикса система завела бы им дубли.
+    prefix = settings.vendor_prefix
+    known_prefixes = [prefix, *(settings.vendor_prefix_history or [])]
+
     # Что УЖЕ есть в кабинете под нашими vendorCode. Критично: WB отклоняет ВЕСЬ батч
     # upload, если хоть один vendorCode уже занят («vendor code is used in other cards»).
     # Поэтому существующие карточки не пересоздаём, а привязываемся к ним.
-    existing_cards = {vc: c for vc, c in (await client.cards_map()).items() if is_ours(vc)}
+    existing_cards = {
+        vc: c for vc, c in (await client.cards_map()).items() if is_ours(vc, known_prefixes)
+    }
 
     existing_links = {
         l.product_id: l
@@ -178,7 +185,7 @@ async def create_wb_cards(
     new_needing_barcode = sum(
         1
         for p in products
-        if vendor_code(p) not in existing_cards
+        if vendor_code(p, prefix) not in existing_cards
         and not _reusable_barcode(existing_links.get(p.id))
     )
     try:
@@ -193,7 +200,7 @@ async def create_wb_cards(
     linked = 0  # карточки, которые уже были в кабинете и к которым привязались
 
     for product in products:
-        vc = vendor_code(product)
+        vc = vendor_code(product, prefix)
         subject_id = SUBJECT_BY_TYPE.get(product.goods_type)
         wb_brand = resolve_wb_brand(product.brand, brand_registry.get(subject_id), brand_map)
         if subject_id and product.brand and not wb_brand:
@@ -231,7 +238,7 @@ async def create_wb_cards(
             else None
         )
         try:
-            cards.append(build_card(product, price, barcode, wb_brand))
+            cards.append(build_card(product, price, barcode, wb_brand, prefix))
         except CardBuildError as exc:
             link = await _link(session, supplier_id, product.id, Platform.WB)
             link.status = IntegrationStatus.ERROR
@@ -261,7 +268,9 @@ async def create_wb_cards(
         await asyncio.sleep(SETTLE_SECONDS)
 
         # Забираем nmID только что созданных карточек и прикрепляем им фото.
-        created = {vc: c for vc, c in (await client.cards_map()).items() if is_ours(vc)}
+        created = {
+        vc: c for vc, c in (await client.cards_map()).items() if is_ours(vc, known_prefixes)
+    }
         errors = await client.card_errors()
         for vc, product in by_vendor.items():
             link = await _link(session, supplier_id, product.id, Platform.WB)
@@ -335,13 +344,19 @@ async def reconcile_wb_pending(session: AsyncSession, supplier_id: int, api_key:
     if not rows:
         return 0
 
+    settings = await get_or_create_settings(session, supplier_id)
+    prefix = settings.vendor_prefix
+    known_prefixes = [prefix, *(settings.vendor_prefix_history or [])]
+
     client = WBClient(api_key)
-    created = {vc: c for vc, c in (await client.cards_map()).items() if is_ours(vc)}
+    created = {
+        vc: c for vc, c in (await client.cards_map()).items() if is_ours(vc, known_prefixes)
+    }
     errors = await client.card_errors()
 
     promoted = 0
     for link, product in rows:
-        vc = vendor_code(product)
+        vc = vendor_code(product, prefix)
         if vc in errors:
             link.status = IntegrationStatus.ERROR
             link.status_message = errors[vc]

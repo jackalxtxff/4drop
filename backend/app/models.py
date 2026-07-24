@@ -410,6 +410,11 @@ class MissingStrategy(StrEnum):
     DELETE = "delete"
 
 
+# Префикс артикулов по умолчанию. Живёт здесь, а не в интеграции WB, потому что нужен
+# как default колонки — иначе получилась бы циклическая зависимость с cards.py.
+DEFAULT_VENDOR_PREFIX = "4D-"
+
+
 class SyncSettings(Base):
     """Расписание фоновых обновлений. Один набор на поставщика.
 
@@ -460,6 +465,14 @@ class SyncSettings(Base):
     missing_strategy: Mapped[str] = mapped_column(
         String(32), default=MissingStrategy.ZERO_STOCK
     )
+
+    # Префикс артикулов (vendorCode) наших карточек: по нему система отличает своё от
+    # товаров, которые продавец завёл сам, и не правит чужие цены/остатки.
+    vendor_prefix: Mapped[str] = mapped_column(String(16), default=DEFAULT_VENDOR_PREFIX)
+    # Префиксы, которыми уже пользовались. Своими считаем карточки с ЛЮБЫМ из них:
+    # иначе после смены префикса ранее созданные карточки перестали бы опознаваться и
+    # система завела бы им дубли с новым артикулом.
+    vendor_prefix_history: Mapped[list] = mapped_column(JSONB, default=list)
 
     # Буфер остатка: сколько штук вычитать из реального остатка перед отправкой на
     # маркетплейс. Реальный остаток 4tochki в products.total_rest НЕ меняем — буфер

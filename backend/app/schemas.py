@@ -253,6 +253,10 @@ class SyncSettingsIn(BaseModel):
     auto_cards_batch_limit: int = Field(ge=1, le=1000)
     missing_strategy: Literal["zero_stock", "delete"]
     stock_buffer: int = Field(ge=0, le=100000)
+    # Префикс артикулов наших карточек. Только латиница, цифры, дефис и подчёркивание:
+    # это часть vendorCode на маркетплейсе. Пустым быть не может — по нему система
+    # отличает свои карточки от чужих товаров продавца.
+    vendor_prefix: str = Field(min_length=1, max_length=16, pattern=r"^[A-Za-z0-9_-]+$")
     wb_price_formula: str = Field(min_length=1, max_length=500)
     ozon_price_formula: str = Field(min_length=1, max_length=500)
     wb_price_before_formula: str = Field(min_length=1, max_length=500)
@@ -272,6 +276,8 @@ class SyncSettingsOut(BaseModel):
     auto_cards_batch_limit: int
     missing_strategy: str
     stock_buffer: int
+    vendor_prefix: str
+    vendor_prefix_history: list[str] = []
     wb_price_formula: str
     ozon_price_formula: str
     wb_price_before_formula: str

@@ -219,6 +219,10 @@ export interface SyncSettings {
   auto_cards_batch_limit: number;
   missing_strategy: "zero_stock" | "delete";
   stock_buffer: number;
+  /** Префикс артикулов (vendorCode) наших карточек на маркетплейсах. */
+  vendor_prefix: string;
+  /** Префиксы, которыми пользовались раньше — карточки с ними тоже считаются нашими. */
+  vendor_prefix_history: string[];
   wb_price_formula: string;
   ozon_price_formula: string;
   wb_price_before_formula: string;

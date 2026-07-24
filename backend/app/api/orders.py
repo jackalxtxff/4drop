@@ -301,10 +301,25 @@ async def create_supplier_order(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Доступы к 4tochki не заданы")
     secrets = load_secrets(cred)
 
+    # Мультисклад: заказ едет на адрес ТОГО FBS-склада, откуда пришёл заказ, — иначе
+    # товар приедет не в тот город (и не за те сроки). Адрес берём из привязки склада-
+    # источника; если её нет (старые записи) — падаем на адрес по умолчанию кабинета.
+    mapping_address = await session.scalar(
+        select(WarehouseMapping.address_id).where(
+            WarehouseMapping.supplier_id == supplier.id,
+            WarehouseMapping.platform == order.platform,
+            WarehouseMapping.fourtochki_wrh == order.source_warehouse_id,
+        )
+    )
+    address_id = mapping_address or (cred.settings or {}).get("address_id")
+
     try:
         client = FourTochkiClient(secrets["login"], secrets["password"])
         created = await client.create_order(
-            lines, order_number=order.mp_order_id, is_test=True
+            lines,
+            address_id=address_id,
+            order_number=order.mp_order_id,
+            is_test=True,
         )
     except (FourTochkiError, KeyError) as exc:
         order.error = str(exc)

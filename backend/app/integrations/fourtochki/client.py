@@ -58,6 +58,31 @@ class Warehouse:
 
 
 @dataclass(slots=True)
+class DeliveryAddress:
+    """Адрес доставки из ЛК 4tochki — точка, куда приезжает заказ.
+
+    Ключевая сущность: от адреса зависит и НАБОР доступных складов, и срок доставки с
+    каждого из них (logistic_days). Один и тот же склад из разных адресов приезжает за
+    разное время, поэтому склады всегда запрашиваются под конкретный адрес.
+    """
+
+    id: int
+    name: str | None = None
+    city: str | None = None
+    street: str | None = None
+    house: str | None = None
+    is_default: bool = False
+
+    @property
+    def title(self) -> str:
+        """Короткая подпись для UI: «Ижевск, Удмуртская улица 255Б»."""
+        parts = [p for p in (self.city, self.street, self.house) if p]
+        return ", ".join(parts[:1] + ([" ".join(parts[1:])] if parts[1:] else [])) or (
+            self.name or f"Адрес {self.id}"
+        )
+
+
+@dataclass(slots=True)
 class WarehousePriceRest:
     wrh: int
     rest: int
@@ -216,6 +241,35 @@ class FourTochkiClient:
             if name and getattr(u, "active", True):
                 return name
         return users[0].name if users and getattr(users[0], "name", None) else None
+
+    async def get_addresses(self) -> list[DeliveryAddress]:
+        """GetAddressList — адреса доставки кабинета.
+
+        Адреса заводит пользователь в ЛК 4tochki; мы их только читаем. Выбранный адрес
+        определяет, какие склады доступны и с какими сроками (см. get_warehouses).
+        """
+        result = await self._call("GetAddressList", {})
+        if getattr(result, "success", None) is False:
+            raise FourTochkiError(
+                _err_text(getattr(result, "error", None)) or "GetAddressList: неизвестная ошибка"
+            )
+
+        out: list[DeliveryAddress] = []
+        for a in _list(getattr(result, "getAddressListItems", None)):
+            aid = getattr(a, "addressId", None)
+            if aid is None:
+                continue
+            out.append(
+                DeliveryAddress(
+                    id=int(aid),
+                    name=getattr(a, "addressName", None),
+                    city=getattr(a, "cityName", None),
+                    street=getattr(a, "streetName", None),
+                    house=getattr(a, "houseNumber", None),
+                    is_default=bool(getattr(a, "isDefaultAddress", False)),
+                )
+            )
+        return out
 
     async def get_warehouses(self, address_id: int | None = None) -> list[Warehouse]:
         result = await self._call("GetWarehouses", address_id)

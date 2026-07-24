@@ -78,6 +78,24 @@ class WarehouseOut(BaseModel):
     total_rest: int | None = None
 
 
+class AddressOut(BaseModel):
+    """Адрес доставки 4tochki. Заводится в ЛК поставщика, мы только читаем."""
+
+    id: int
+    title: str
+    is_default: bool = False
+    # Сколько складов доступно с этого адреса и сколько из них «день в день» —
+    # чтобы выбор адреса был осознанным (от него зависят и склады, и сроки).
+    warehouse_count: int | None = None
+    same_day_count: int | None = None
+
+
+class AddressSelectIn(BaseModel):
+    """Выбор активного адреса доставки 4tochki."""
+
+    address_id: int
+
+
 class CredentialOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     platform: str
@@ -88,6 +106,9 @@ class CredentialOut(BaseModel):
     secrets_masked: dict
     warehouses: list[WarehouseOut] = []
     selected_warehouses: list[int] = []
+    # Только 4tochki: адреса доставки и активный (склады и сроки зависят от него).
+    addresses: list[AddressOut] = []
+    address_id: int | None = None
 
 
 # --- товары -----------------------------------------------------------------
@@ -329,6 +350,9 @@ class FbsWarehouseOut(BaseModel):
     name: str | None = None
     # Выключенный склад: на него публикуется остаток 0 (товар с него не продаётся).
     enabled: bool = True
+    # Адрес доставки 4tochki, который кормит этот FBS-склад (город приёмки).
+    # Задаёт, какие склады 4tochki доступны как источники и куда поедет заказ.
+    address_id: int | None = None
 
 
 class FbsToggleIn(BaseModel):
@@ -340,14 +364,16 @@ class WarehouseMappingOut(BaseModel):
     fourtochki_wrh: int
     fbs_warehouse_id: str
     fbs_warehouse_name: str | None = None
+    address_id: int | None = None
     priority: int = 0
 
 
 class WarehouseMappingItemIn(BaseModel):
-    """Одна привязка: склад 4tochki → FBS-склад площадки."""
+    """Одна привязка: склад 4tochki (с его адреса) → FBS-склад площадки."""
 
     fourtochki_wrh: int
     fbs_warehouse_id: str
+    address_id: int | None = None
     priority: int = 0
 
 
@@ -356,10 +382,15 @@ class WarehouseMappingsIn(BaseModel):
 
     disabled_fbs — id выключенных FBS-складов (на них публикуется остаток 0). Состояние
     вкл/выкл сохраняется здесь же, по кнопке «Сохранить», а не по каждому переключению.
+
+    fbs_addresses — адрес доставки 4tochki для каждого FBS-склада (мультисклад: ижевский
+    FBS кормится с ижевского адреса, московский — с московского). Хранится отдельно от
+    привязок, чтобы адрес можно было выбрать до того, как отмечены склады.
     """
 
     mappings: list[WarehouseMappingItemIn] = []
     disabled_fbs: list[str] = []
+    fbs_addresses: dict[str, int] = {}
 
 
 class PlatformMappingView(BaseModel):
@@ -374,6 +405,15 @@ class PlatformMappingView(BaseModel):
 
 
 class WarehouseMappingsView(BaseModel):
-    # Выбранные склады 4tochki — их и привязываем к FBS-складам.
-    fourtochki_warehouses: list[WarehouseOut] = []
+    """Данные для мультискладовой привязки.
+
+    Склады отдаются в разрезе адресов: у одного склада в разных городах разные сроки,
+    и набор складов тоже отличается. UI показывает для каждого FBS-склада только те
+    склады, что доступны с выбранного для него адреса.
+    """
+
+    # Адреса доставки 4tochki на выбор (со счётчиками складов).
+    addresses: list[AddressOut] = []
+    # address_id (строкой) → склады, доступные с этого адреса, с его сроками.
+    warehouses_by_address: dict[str, list[WarehouseOut]] = {}
     platforms: list[PlatformMappingView] = []

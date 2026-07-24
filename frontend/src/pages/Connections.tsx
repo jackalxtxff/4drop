@@ -4,6 +4,7 @@ import {
   api,
   type Credential,
   type PlatformMappingView,
+  type Warehouse,
   type WarehouseMappingsView,
 } from "../api";
 import { useSupplier } from "../components/Layout";
@@ -188,40 +189,65 @@ const MP_LABEL: Record<string, string> = {
   wb: "Wildberries",
   ozon: "Ozon",
 };
-
-/** Привязка одной площадки: FBS-склад → мультиселект складов 4tochki, которые его
- *  обслуживают. Один склад 4tochki можно привязать только к одному FBS-складу —
- *  поэтому в остальных FBS он показывается недоступным. */
+/** Привязка одной площадки (мультисклад).
+ *
+ *  У каждого FBS-склада свой адрес доставки 4tochki: ижевский FBS кормится с ижевского
+ *  адреса, московский — с московского. Поэтому сначала выбирается адрес, а склады-
+ *  источники предлагаются только те, что доступны с него, и со сроками именно для него.
+ *  Один склад 4tochki можно привязать только к одному FBS — иначе его остаток
+ *  опубликовался бы дважды и мы получили бы оверселл. */
 function PlatformBinding({
   platform,
-  ftWarehouses,
+  addresses,
+  warehousesByAddress,
   supplierId,
   onSaved,
 }: {
   platform: PlatformMappingView;
-  ftWarehouses: WarehouseMappingsView["fourtochki_warehouses"];
+  addresses: WarehouseMappingsView["addresses"];
+  warehousesByAddress: WarehouseMappingsView["warehouses_by_address"];
   supplierId: number;
   onSaved: () => Promise<void>;
 }) {
   // Локально: склад 4tochki → id FBS-склада, к которому он привязан.
-  const build = () => {
+  const buildAssign = () => {
     const a: Record<number, string> = {};
     for (const m of platform.mappings) a[m.fourtochki_wrh] = m.fbs_warehouse_id;
     return a;
   };
-  // Локально: выключенные FBS-склады. Состояние применяется только по «Сохранить».
+  // Локально: FBS-склад → выбранный адрес доставки.
+  const buildAddr = () => {
+    const a: Record<string, number> = {};
+    for (const w of platform.fbs_warehouses) if (w.address_id) a[w.id] = w.address_id;
+    return a;
+  };
   const buildDisabled = () =>
     new Set(platform.fbs_warehouses.filter((w) => !w.enabled).map((w) => w.id));
 
-  const [assign, setAssign] = useState<Record<number, string>>(build);
+  const [assign, setAssign] = useState<Record<number, string>>(buildAssign);
+  const [fbsAddr, setFbsAddr] = useState<Record<string, number>>(buildAddr);
   const [disabledFbs, setDisabledFbs] = useState<Set<string>>(buildDisabled);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // Какие списки складов раскрыты (по id FBS-склада). Свёрнуты по умолчанию:
+  // складов бывает под сотню, иначе страница превращается в простыню.
+  const [openPickers, setOpenPickers] = useState<Set<string>>(new Set());
+  const [openDelivery, setOpenDelivery] = useState<Set<string>>(new Set());
+
+  const flip = (set: Set<string>, id: string) => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  };
+  const togglePicker = (id: string) => setOpenPickers((s) => flip(s, id));
+  const toggleDelivery = (id: string) => setOpenDelivery((s) => flip(s, id));
 
   // Извне пришли обновлённые данные (после сохранения/перезагрузки) — пересобрать.
   useEffect(() => {
-    setAssign(build());
+    setAssign(buildAssign());
+    setFbsAddr(buildAddr());
     setDisabledFbs(buildDisabled());
     setSaved(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -237,13 +263,24 @@ function PlatformBinding({
     });
   };
 
-  // Переключение вкл/выкл — только локально; сохранится по кнопке.
   const toggleFbs = (fbsId: string) => {
     setSaved(false);
     setDisabledFbs((d) => {
       const next = new Set(d);
       if (next.has(fbsId)) next.delete(fbsId);
       else next.add(fbsId);
+      return next;
+    });
+  };
+
+  /** Смена адреса у FBS-склада снимает его привязки: с другого адреса доступны
+   *  другие склады, старые там просто не существуют. */
+  const changeFbsAddress = (fbsId: string, addressId: number) => {
+    setSaved(false);
+    setFbsAddr((a) => ({ ...a, [fbsId]: addressId }));
+    setAssign((a) => {
+      const next = { ...a };
+      for (const [wrh, fbs] of Object.entries(a)) if (fbs === fbsId) delete next[Number(wrh)];
       return next;
     });
   };
@@ -255,11 +292,12 @@ function PlatformBinding({
       const mappings = Object.entries(assign).map(([wrh, fbs]) => ({
         fourtochki_wrh: Number(wrh),
         fbs_warehouse_id: fbs,
+        address_id: fbsAddr[fbs] ?? null,
         priority: 0,
       }));
       await api.put(
         `/suppliers/${supplierId}/connections/warehouse-mappings/${platform.platform}`,
-        { mappings, disabled_fbs: [...disabledFbs] },
+        { mappings, disabled_fbs: [...disabledFbs], fbs_addresses: fbsAddr },
       );
       await onSaved();
       setSaved(true);
@@ -268,6 +306,58 @@ function PlatformBinding({
     } finally {
       setSaving(false);
     }
+  };
+
+  /** Карточка одного склада-источника с чекбоксом. Вынесена, чтобы одинаково
+   *  рисовать локальные склады и группу «с доставкой». */
+  const renderWarehouse = (w: Warehouse, fbsId: string, enabled: boolean) => {
+    const here = assign[w.id] === fbsId;
+    const elsewhere = assign[w.id] != null && assign[w.id] !== fbsId;
+    const locked = elsewhere || !enabled;
+    const days = w.logistic_days ?? 0;
+    return (
+      <label
+        key={w.id}
+        className={`flex items-start gap-2 rounded-lg border p-2.5 text-sm transition ${
+          locked
+            ? "cursor-not-allowed border-slate-100 opacity-50 dark:border-slate-800"
+            : here
+              ? "cursor-pointer border-slate-900 bg-slate-50 dark:border-slate-400 dark:bg-slate-800"
+              : "cursor-pointer border-slate-200 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={here}
+          disabled={locked}
+          onChange={() => toggle(fbsId, w.id)}
+          className="mt-0.5"
+        />
+        <span className="min-w-0">
+          <span className="block truncate">
+            {w.name}
+            <span className="ml-1.5 text-xs font-normal text-slate-400">
+              {w.total_rest ?? 0} шт
+            </span>
+          </span>
+          <span
+            className={`text-xs ${
+              days === 0
+                ? "text-emerald-600 dark:text-emerald-400"
+                : days > 2
+                  ? "text-amber-600 dark:text-amber-400"
+                  : "text-slate-400"
+            }`}
+          >
+            {days === 0 ? "день в день" : `логистика ${days} дн.`}
+            {days > 2 && " — риск сорвать SLA"}
+          </span>
+          {elsewhere && (
+            <span className="block text-xs text-slate-400">уже на другом FBS-складе</span>
+          )}
+        </span>
+      </label>
+    );
   };
 
   const label = MP_LABEL[platform.platform] ?? platform.platform;
@@ -304,95 +394,166 @@ function PlatformBinding({
         <p className="px-4 pt-3 text-xs text-amber-600 dark:text-amber-400">{platform.message}</p>
       )}
 
-      <div className="space-y-4 p-4">
+      <div className="space-y-5 p-4">
         {platform.fbs_warehouses.map((fbs) => {
-          // Живой суммарный остаток привязанных к этому FBS складов 4tochki —
-          // пересчитывается сразу при переключении чекбоксов, до сохранения.
-          const boundStock = ftWarehouses
-            .filter((w) => assign[w.id] === fbs.id)
-            .reduce((s, w) => s + (w.total_rest ?? 0), 0);
-          // Вкл/выкл берём из локального состояния (применится по «Сохранить»).
           const enabled = !disabledFbs.has(fbs.id);
+          const addressId = fbsAddr[fbs.id];
+          const available = addressId ? (warehousesByAddress[String(addressId)] ?? []) : [];
+          const chosen = available.filter((w) => assign[w.id] === fbs.id);
+          // Живой остаток привязанных складов — пересчитывается сразу при клике.
+          const boundStock = chosen.reduce((s, w) => s + (w.total_rest ?? 0), 0);
+          // Группируем по СРОКУ, а не по флагу have_delivery: он означает «4tochki
+          // может привезти», а не скорость, и со сроками не коррелирует (Домодедово —
+          // have_delivery, но 0 дней; «Склад 2» — самовывоз, но 11 дней). Для FBS
+          // решает именно срок, поэтому «день в день» на виду, остальные — свёрнуты.
+          const local = available.filter((w) => (w.logistic_days ?? 0) === 0);
+          const delivery = available
+            .filter((w) => (w.logistic_days ?? 0) > 0)
+            .sort((a, b) => (a.logistic_days ?? 0) - (b.logistic_days ?? 0));
+          const pickerOpen = openPickers.has(fbs.id);
+          const deliveryOpen = openDelivery.has(fbs.id);
+
           return (
-          <div key={fbs.id} className={enabled ? "" : "opacity-60"}>
-            <div className="mb-2 flex items-center gap-2 text-sm font-medium">
-              <span className="rounded bg-slate-100 px-2 py-0.5 text-xs dark:bg-slate-800">
-                FBS
-              </span>
-              {fbs.name ?? `Склад ${fbs.id}`}
-              <span className="text-xs font-normal text-slate-400">#{fbs.id}</span>
-              <span
-                className={`rounded px-1.5 py-0.5 text-xs font-normal ${
-                  enabled
-                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                    : "bg-slate-100 text-slate-500 line-through dark:bg-slate-800"
-                }`}
-                title="Реальный остаток привязанных складов 4tochki, который уйдёт на этот FBS-склад (до вычета буфера)"
-              >
-                остаток: {boundStock} шт
-              </span>
-              {!enabled && (
-                <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs font-normal text-red-600 dark:bg-red-950 dark:text-red-300">
-                  выключен · на площадку 0
+            <div key={fbs.id} className={enabled ? "" : "opacity-60"}>
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-sm font-medium">
+                <span className="rounded bg-slate-100 px-2 py-0.5 text-xs dark:bg-slate-800">
+                  FBS
                 </span>
-              )}
-              {/* Тумблер вкл/выкл — только локально; применится по «Сохранить». */}
-              <button
-                type="button"
-                role="switch"
-                aria-checked={enabled}
-                onClick={() => toggleFbs(fbs.id)}
-                title={enabled ? "Выключить склад (остаток → 0 после сохранения)" : "Включить склад"}
-                className={`relative ml-auto h-5 w-9 shrink-0 rounded-full transition ${
-                  enabled ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"
-                }`}
-              >
+                {fbs.name ?? `Склад ${fbs.id}`}
+                <span className="text-xs font-normal text-slate-400">#{fbs.id}</span>
                 <span
-                  className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
-                    enabled ? "left-[18px]" : "left-0.5"
+                  className={`rounded px-1.5 py-0.5 text-xs font-normal ${
+                    enabled
+                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                      : "bg-slate-100 text-slate-500 line-through dark:bg-slate-800"
                   }`}
-                />
-              </button>
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {ftWarehouses.map((w) => {
-                const here = assign[w.id] === fbs.id;
-                const elsewhere = assign[w.id] != null && assign[w.id] !== fbs.id;
-                const locked = elsewhere || !enabled;
-                return (
-                  <label
-                    key={w.id}
-                    className={`flex items-start gap-2 rounded-lg border p-2.5 text-sm transition ${
-                      locked
-                        ? "cursor-not-allowed border-slate-100 opacity-50 dark:border-slate-800"
-                        : here
-                          ? "cursor-pointer border-slate-900 bg-slate-50 dark:border-slate-400 dark:bg-slate-800"
-                          : "cursor-pointer border-slate-200 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                  title="Реальный остаток привязанных складов 4tochki (до вычета буфера)"
+                >
+                  остаток: {boundStock} шт
+                </span>
+                {!enabled && (
+                  <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs font-normal text-red-600 dark:bg-red-950 dark:text-red-300">
+                    выключен · на площадку 0
+                  </span>
+                )}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={enabled}
+                  onClick={() => toggleFbs(fbs.id)}
+                  title={enabled ? "Выключить склад (остаток → 0 после сохранения)" : "Включить склад"}
+                  className={`relative ml-auto h-5 w-9 shrink-0 rounded-full transition ${
+                    enabled ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                      enabled ? "left-[18px]" : "left-0.5"
                     }`}
+                  />
+                </button>
+              </div>
+
+              {/* Адрес приёмки для этого FBS-склада: от него зависят и доступные
+                  склады-источники, и сроки, и куда поедет заказ. */}
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-slate-500 dark:text-slate-400">Адрес приёмки:</span>
+                <select
+                  value={addressId ?? ""}
+                  disabled={!enabled}
+                  onChange={(e) => changeFbsAddress(fbs.id, Number(e.target.value))}
+                  className="min-w-[260px] rounded-md border border-slate-300 bg-white px-2 py-1 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800"
+                >
+                  <option value="">— выберите город —</option>
+                  {addresses.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.title}
+                      {a.warehouse_count !== null
+                        ? ` — складов ${a.warehouse_count}, «день в день» ${a.same_day_count}`
+                        : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {!addressId ? (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Выберите город приёмки — после этого появятся склады, доступные с него.
+                </p>
+              ) : (
+                <>
+                  {/* Список источников свёрнут: складов бывает под сотню, развёрнутыми
+                      они превращают страницу в простыню. В свёрнутом виде показываем
+                      главное — что уже выбрано. */}
+                  <button
+                    type="button"
+                    onClick={() => togglePicker(fbs.id)}
+                    className="flex w-full items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-left text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
                   >
-                    <input
-                      type="checkbox"
-                      checked={here}
-                      disabled={locked}
-                      onChange={() => toggle(fbs.id, w.id)}
-                      className="mt-0.5"
-                    />
-                    <span className="min-w-0">
-                      <span className="block truncate">
-                        {w.name}
-                        <span className="ml-1.5 text-xs font-normal text-slate-400">
-                          {w.total_rest ?? 0} шт
-                        </span>
+                    <span className="text-slate-400">{pickerOpen ? "▾" : "▸"}</span>
+                    <span className="font-medium">Склады-источники</span>
+                    <span className="text-slate-500 dark:text-slate-400">
+                      выбрано {chosen.length} из {available.length}
+                      <span className="ml-1 text-xs text-emerald-600 dark:text-emerald-400">
+                        («день в день»: {local.length})
                       </span>
-                      {elsewhere && (
-                        <span className="text-xs text-slate-400">уже на другом FBS-складе</span>
-                      )}
                     </span>
-                  </label>
-                );
-              })}
+                    {chosen.length > 0 && (
+                      <span className="min-w-0 flex-1 truncate text-xs text-slate-400">
+                        {chosen.map((w) => w.name).join(", ")}
+                      </span>
+                    )}
+                  </button>
+
+                  {pickerOpen && (
+                    <div className="mt-2 space-y-3">
+                      {local.length > 0 && (
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {local.map((w) => renderWarehouse(w, fbs.id, enabled))}
+                        </div>
+                      )}
+
+                      {local.length > 0 && delivery.length > 0 && (
+                        <p className="text-xs text-slate-400">
+                          Выше — склады «день в день» ({local.length}). Остальные едут
+                          дольше и для FBS обычно не подходят по срокам.
+                        </p>
+                      )}
+
+                      {/* Едут дольше одного дня — отдельной свёрнутой группой, по
+                          возрастанию срока: сверху те, что ещё пригодны для FBS. */}
+                      {delivery.length > 0 && (
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => toggleDelivery(fbs.id)}
+                            className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+                          >
+                            <span className="text-slate-400">{deliveryOpen ? "▾" : "▸"}</span>
+                            С доставкой ({delivery.length})
+                            <span className="text-xs text-slate-400">
+                              — от {Math.min(...delivery.map((w) => w.logistic_days ?? 0))} до{" "}
+                              {Math.max(...delivery.map((w) => w.logistic_days ?? 0))} дн.
+                            </span>
+                          </button>
+                          {deliveryOpen && (
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              {delivery.map((w) => renderWarehouse(w, fbs.id, enabled))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {available.length === 0 && (
+                        <p className="text-xs text-slate-500">
+                          С этого адреса складов не найдено — проверьте подключение 4tochki.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-          </div>
           );
         })}
       </div>
@@ -411,16 +572,19 @@ function WarehouseBinding({
 }) {
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-      <h2 className="font-semibold tracking-tight">Привязка складов к FBS</h2>
+      <h2 className="font-semibold tracking-tight">Склады: 4tochki → FBS</h2>
       <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-        Отметьте, какие склады 4tochki обслуживают каждый FBS-склад площадки. По этой
-        привязке в заказах определяется, из какой точки поедет товар. Один склад 4tochki
-        можно привязать только к одному FBS-складу.
+        Мультисклад: у каждого FBS-склада свой город приёмки. Ижевский FBS продаёт с
+        ижевских складов, московский — с московских. Выберите городу FBS-склада адрес и
+        отметьте склады-источники: остаток на площадку считается как их сумма, а заказ
+        поедет на адрес этого же FBS-склада. Один склад 4tochki можно отдать только
+        одному FBS — иначе его остаток ушёл бы дважды и получился бы оверселл.
       </p>
 
-      {view.fourtochki_warehouses.length === 0 ? (
+      {view.addresses.length === 0 ? (
         <p className="mt-4 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-          Сначала выберите склады 4tochki выше — привязывать пока нечего.
+          Нет адресов доставки. Заведите адрес в личном кабинете 4tochki и нажмите
+          «Проверить подключение».
         </p>
       ) : (
         <div className="mt-4 space-y-4">
@@ -428,7 +592,8 @@ function WarehouseBinding({
             <PlatformBinding
               key={p.platform}
               platform={p}
-              ftWarehouses={view.fourtochki_warehouses}
+              addresses={view.addresses}
+              warehousesByAddress={view.warehouses_by_address}
               supplierId={supplierId}
               onSaved={onSaved}
             />
@@ -490,15 +655,9 @@ export function ConnectionsPage() {
     }
   };
 
-  const toggleWarehouse = async (id: number) => {
-    if (!ftCred) return;
-    const next = ftCred.selected_warehouses.includes(id)
-      ? ftCred.selected_warehouses.filter((w) => w !== id)
-      : [...ftCred.selected_warehouses, id];
-    await run("wrh", () =>
-      api.put(`/suppliers/${supplierId}/connections/fourtochki/warehouses`, next),
-    );
-  };
+  // Отдельного выбора складов больше нет: набор отслеживаемых складов выводится из
+  // привязок к FBS-складам (см. блок «Склады: 4tochki → FBS»), а адрес выбирается
+  // там же — свой для каждого FBS-склада.
 
   return (
     <div className="space-y-6">
@@ -630,51 +789,42 @@ export function ConnectionsPage() {
         </Card>
       </div>
 
-      {ftCred && ftCred.warehouses.length > 0 && (
+      {ftCred && ftCred.addresses.length > 0 && (
         <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-          <h2 className="font-semibold tracking-tight">Склады 4tochki</h2>
+          <h2 className="font-semibold tracking-tight">Адреса приёмки 4tochki</h2>
           <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-            Остатки берутся только с выбранных складов. Срок логистики напрямую съедает SLA
-            сборки на маркетплейсе — склады с долгой доставкой лучше не включать.
+            Адреса заводятся в личном кабинете 4tochki — мы их только читаем. От адреса
+            зависят и набор доступных складов, и срок доставки с каждого: один и тот же
+            склад в разные города едет разное время. Какие склады использовать —
+            настраивается ниже, отдельно для каждого FBS-склада.
           </p>
 
-          {ftCred.selected_warehouses.length === 0 && (
-            <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-              Ни один склад не выбран — остатки по всем товарам будут нулевыми.
-            </p>
-          )}
-
           <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {ftCred.warehouses.map((w) => {
-              const checked = ftCred.selected_warehouses.includes(w.id);
-              const slow = (w.logistic_days ?? 0) > 2;
-              return (
-                <label
-                  key={w.id}
-                  className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition ${
-                    checked
-                      ? "border-slate-900 bg-slate-50 dark:border-slate-400 dark:bg-slate-800"
-                      : "border-slate-200 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => void toggleWarehouse(w.id)}
-                    className="mt-0.5"
-                  />
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium">{w.name}</span>
-                    <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
-                      Логистика: {w.logistic_days ?? "—"} дн.
-                      {slow && <span className="ml-1 text-amber-700">риск для SLA</span>}
-                      {w.is_paid_delivery && <span className="ml-1">· платная доставка</span>}
-                    </span>
-                  </span>
-                </label>
-              );
-            })}
+            {ftCred.addresses.map((a) => (
+              <div
+                key={a.id}
+                className="rounded-lg border border-slate-200 p-3 dark:border-slate-700"
+              >
+                <p className="truncate text-sm font-medium">{a.title}</p>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Складов: {a.warehouse_count ?? "—"}
+                  {a.same_day_count !== null && (
+                    <>
+                      {" · "}
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        «день в день»: {a.same_day_count}
+                      </span>
+                    </>
+                  )}
+                </p>
+              </div>
+            ))}
           </div>
+
+          <p className="mt-3 text-xs text-slate-400">
+            Отслеживаются склады, привязанные к FBS: {ftCred.selected_warehouses.length}.
+            Остатки в каталоге считаются по ним.
+          </p>
         </section>
       )}
 

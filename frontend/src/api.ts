@@ -87,6 +87,15 @@ export interface Warehouse {
 
 export type ConnectionStatus = "not_configured" | "ok" | "error";
 
+/** Адрес доставки 4tochki. От него зависят и набор складов, и сроки с каждого. */
+export interface Address {
+  id: number;
+  title: string;
+  is_default: boolean;
+  warehouse_count: number | null;
+  same_day_count: number | null;
+}
+
 export interface Credential {
   platform: "fourtochki" | "wb" | "ozon";
   status: ConnectionStatus;
@@ -96,6 +105,8 @@ export interface Credential {
   secrets_masked: Record<string, string>;
   warehouses: Warehouse[];
   selected_warehouses: number[];
+  addresses: Address[];
+  address_id: number | null;
 }
 
 export interface Product {
@@ -282,12 +293,15 @@ export interface FbsWarehouse {
   id: string;
   name: string | null;
   enabled: boolean;
+  /** Адрес доставки 4tochki, который кормит этот FBS-склад (город приёмки). */
+  address_id: number | null;
 }
 
 export interface WarehouseMapping {
   fourtochki_wrh: number;
   fbs_warehouse_id: string;
   fbs_warehouse_name: string | null;
+  address_id: number | null;
   priority: number;
 }
 
@@ -300,7 +314,11 @@ export interface PlatformMappingView {
   mappings: WarehouseMapping[];
 }
 
+/** Мультисклад: склады отдаются в разрезе адресов — у одного склада в разных
+ *  городах разные сроки, и наборы складов отличаются. */
 export interface WarehouseMappingsView {
-  fourtochki_warehouses: Warehouse[];
+  addresses: Address[];
+  /** address_id (строкой) → склады, доступные с этого адреса, с его сроками. */
+  warehouses_by_address: Record<string, Warehouse[]>;
   platforms: PlatformMappingView[];
 }
